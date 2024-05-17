@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "camel"
+version = "0.1.0"
+description = "CAMEL: Context-Aware Modifier for Efficient Language model"
+authors = ["Welles Sun <welles.sun@zju.edu.cn>"]
+readme = "README.md"
+packages = [{include = "camel", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+pytest = "^8.2.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
