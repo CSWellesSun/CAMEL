@@ -9,6 +9,10 @@ packages = [{include = "camel", from = "src"}]
 [tool.poetry.dependencies]
 python = "^3.9"
 pytest = "^8.2.0"
+torch = "^2.3.0"
+datasets = "^2.19.1"
+transformers = "^4.41.0"
+fastchat = "^0.1.0"
 
 
 [build-system]
