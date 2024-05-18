@@ -7,13 +7,13 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMS
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.utils import logging
 
-from ...modeling_outputs import CamelModifierOutput
+from ...modifier_outputs import CamelModifierOutput
 
 logger = logging.get_logger(__name__)
 
 
 class LlamaCamelModifier(LlamaModel):
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, load_embedding=False, model_path=""):
         self.window_size = config.window_size
         self.compression_layer = nn.ModuleList(
             [
@@ -29,12 +29,36 @@ class LlamaCamelModifier(LlamaModel):
         )
         super().__init__(config)
         del self.layers
+        if load_embedding:
+            import os
+            import json
+            from safetensors import safe_open
+
+            try:
+                with open(os.path.join(model_path, "model.safetensors.index.json"), "r") as f:
+                    index_json = json.loads(f.read())
+                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                with safe_open(
+                    os.path.join(model_path, emb_path), framework="pt", device="cpu"
+                ) as f:
+                    tensor_slice = f.get_slice("model.embed_tokens.weight")
+                    vocab_size, hidden_dim = tensor_slice.get_shape()
+                    tensor = tensor_slice[:, :hidden_dim].float()
+            except:
+                with open(os.path.join(model_path, "pytorch_model.bin.index.json"), "r") as f:
+                    index_json = json.loads(f.read())
+                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                weights = torch.load(os.path.join(model_path, emb_path))
+                tensor = weights["model.embed_tokens.weight"].float()
+            self.embed_tokens.weight.data = tensor
+        for param in self.embed_tokens.parameters():
+            param.requires_grad = False
 
     def forward(
         self,
-        input_ids: torch.LongTensor = None, # [bs, seq_len]
-        attention_mask: Optional[torch.Tensor] = None, # [bs, seq_len]
-        position_ids: Optional[torch.LongTensor] = None, # [bs, seq_len]
+        input_ids: torch.LongTensor = None,  # [bs, seq_len]
+        attention_mask: Optional[torch.Tensor] = None,  # [bs, seq_len]
+        position_ids: Optional[torch.LongTensor] = None,  # [bs, seq_len]
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
