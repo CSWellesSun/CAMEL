@@ -1,7 +1,3 @@
-import torch
-from torch import nn
+from camel.models.llama.modifier_llama import LlamaCamelModifier
 
-
-class CamelModifier(nn.Module):
-    def __init__(self):
-        pass
+CamelModifier = LlamaCamelModifier

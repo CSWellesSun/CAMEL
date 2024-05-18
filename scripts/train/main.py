@@ -4,13 +4,11 @@ import json
 import torch
 import numpy as np
 
-from .train_config import TrainConfig
-
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from safetensors import safe_open
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from camel.models.llama.modifier_llama import LlamaCamelModifier
+from camel import CamelModifier
 from typing import Any, Dict, List
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
@@ -19,6 +17,35 @@ from transformers import get_linear_schedule_with_warmup, AutoConfig
 
 torch.backends.cuda.matmul.allow_tf32 = True
 set_seed(0)
+
+
+@dataclass
+class TrainConfig:
+    datapath: str
+    config_path: str
+    lr: float
+    bs: int
+    gradient_accumulation_steps: int
+    is_warmup: bool
+    num_epochs: int
+    num_warmup_steps: int
+    total_steps: int
+    p_w: float
+    v_w: float
+    head_w: float
+    num_workers: int
+    embedding: bool
+    act: str
+    data_noise: bool
+    noise: str
+    mean: float
+    std: float
+    residual: str
+    max_len: int
+    b1: float
+    b2: float
+    grad_clip: float
+    save_freq: int
 
 
 def list_files(path):
@@ -315,7 +342,7 @@ if __name__ == "__main__":
             os.makedirs(args.checkpoint_dir)
 
     config = AutoConfig.from_pretrained(train_config.config_path)
-    model = LlamaCamelModifier(config, load_embedding=True, model_path=args.model_path)
+    model = CamelModifier(config, load_embedding=True, model_path=args.model_path)
 
     criterion = nn.SmoothL1Loss(reduction="none")
     optimizer = optim.AdamW(

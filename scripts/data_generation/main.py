@@ -1,10 +1,17 @@
 import argparse
 import torch
-from .prompt import system_prompt
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastchat.model.model_adapter import get_conversation_template
 
+system_prompt = (
+    "You are a helpful, respectful and honest assistant. "
+    "Always answer as helpfully as possible, while being safe.  "
+    "Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. "
+    "Please ensure that your responses are socially unbiased and positive in nature.\n\n"
+    "If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. "
+    "If you don't know the answer to a question, please don't share false information."
+)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -18,8 +25,9 @@ if __name__ == "__main__":
         "--model-path", type=str, default="meta-llama/Llama-2-7b-chat-hf"
     )
     parser.add_argument("--outdir", type=str, default="data/")
+    parser.add_argument("--model-type", type=str, default="llama-2-chat")
     args = parser.parse_args()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path, device_map="auto", torch_dtype=torch.float16
     )
@@ -27,7 +35,7 @@ if __name__ == "__main__":
     def preprocess_tokenize(data):
         new_data = {"conversation": [], "input_ids": [], "loss_mask": []}
         for i in range(len(data["id"])):
-            conv = get_conversation_template(args.model_path)
+            conv = get_conversation_template(args.model_type)
             conv.system_message = system_prompt
             roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
             source = data["conversations"][i]
@@ -98,7 +106,7 @@ if __name__ == "__main__":
         }
 
     dataset = load_dataset(
-        args.data_path, data_files=args.data_files, split="Train"
+        args.data_path, data_files=args.data_files, split="train"
     ).shuffle(seed=42)
     dataset = dataset.map(
         preprocess_tokenize,
