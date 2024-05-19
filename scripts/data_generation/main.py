@@ -1,5 +1,6 @@
 import argparse
 import torch
+from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from fastchat.model.model_adapter import get_conversation_template
@@ -26,6 +27,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--outdir", type=str, default="data/")
     parser.add_argument("--model-type", type=str, default="llama-2-chat")
+    parser.add_argument("--num-proc", type=int, default=8)
     args = parser.parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
     model = AutoModelForCausalLM.from_pretrained(
@@ -113,9 +115,10 @@ if __name__ == "__main__":
         batched=True,
         remove_columns=dataset.column_names,
         load_from_cache_file=False,
+        num_proc=args.num_proc,
     )
     dataset.set_format("torch")
 
-    for index, data in enumerate(dataset):
+    for index, data in enumerate(tqdm(dataset)):
         data = preprocess_forward(data)
         torch.save(data, f"{args.outdir}/data_{index}.ckpt")

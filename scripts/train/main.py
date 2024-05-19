@@ -21,30 +21,31 @@ set_seed(0)
 
 @dataclass
 class TrainConfig:
-    datapath: str
-    config_path: str
-    lr: float
-    bs: int
+    # accelerate
     gradient_accumulation_steps: int
-    is_warmup: bool
+    # data noise
+    need_data_noise: bool
+    noise_type: str
+    mean: float
+    std: float
+    # data load
+    num_workers: int
+    max_len: int
+    # train
+    bs: int
+    need_warmup: bool
     num_epochs: int
     num_warmup_steps: int
     total_steps: int
-    p_w: float
-    v_w: float
-    head_w: float
-    num_workers: int
-    embedding: bool
-    act: str
-    data_noise: bool
-    noise: str
-    mean: float
-    std: float
-    residual: str
-    max_len: int
+    # optimizer(AdamW)
+    lr: float
     b1: float
     b2: float
+    # loss
+    p_w: float
+    v_w: float
     grad_clip: float
+    # save
     save_freq: int
 
 
@@ -93,9 +94,9 @@ class CustomDataset(Dataset):
     def __getitem__(self, index):
         data = torch.load(self.data[index])
         new_data = {}
-        hidden_state = data["hidden_state"][: train_config["max_len"]][None, :]
-        input_ids = data["input_ids"][: train_config["max_len"]][None, :]
-        loss_mask = data["loss_mask"][: train_config["max_len"]][None, :]
+        hidden_state = data["hidden_state"][: train_config.max_len][None, :]
+        input_ids = data["input_ids"][: train_config.max_len][None, :]
+        loss_mask = data["loss_mask"][: train_config.max_len][None, :]
 
         length = hidden_state.shape[1]
         attention_mask = [1] * length
@@ -262,6 +263,12 @@ if __name__ == "__main__":
         default="../../configs/train_config/llama_2_chat_7B_train_config.json",
     )
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoint/")
+    parser.add_argument("--data-path", type=str, default="data/")
+    parser.add_argument(
+        "--camel-config-path",
+        type=str,
+        default="../../configs/camel_config/llama_2_chat_7B_config.json",
+    )
     args = parser.parse_args()
 
     with open(args.train_config_path, "r") as f:
@@ -307,15 +314,15 @@ if __name__ == "__main__":
     for param in head.parameters():
         param.requires_grad = False
 
-    if train_config.data_noise:
-        if train_config.noise == "uniform":
+    if train_config.need_data_noise:
+        if train_config.noise_type == "uniform":
             aug = AddUniformNoise(std=train_config.std)
         else:
             aug = AddGaussianNoise(mean=train_config.mean, std=train_config.std)
     else:
         aug = None
 
-    datapath = list_files(train_config.datapath)
+    datapath = list_files(args.data_path)
     traindatapath = datapath[: int(len(datapath) * 0.95)]
     testdatapath = datapath[int(len(datapath) * 0.95) :]
     traindataset = CustomDataset(traindatapath, transform=aug)
@@ -341,7 +348,7 @@ if __name__ == "__main__":
         if not os.path.exists(args.checkpoint_dir):
             os.makedirs(args.checkpoint_dir)
 
-    config = AutoConfig.from_pretrained(train_config.config_path)
+    config = AutoConfig.from_pretrained(args.camel_config_path)
     model = CamelModifier(config, load_embedding=True, model_path=args.model_path)
 
     criterion = nn.SmoothL1Loss(reduction="none")
@@ -354,9 +361,9 @@ if __name__ == "__main__":
     num_epochs = train_config.num_epochs
     num_warmup_steps = train_config.num_warmup_steps
     total_steps = train_config.total_steps
-    is_warmup = train_config.is_warmup
+    need_warmup = train_config.need_warmup
 
-    if is_warmup:
+    if need_warmup:
         scheduler = get_linear_schedule_with_warmup(
             optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps
         )
@@ -401,13 +408,11 @@ if __name__ == "__main__":
                 vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (
                     loss_mask.sum() + 1e-5
                 )
-                loss = train_config["v_w"] * vloss + train_config["p_w"] * ploss
+                loss = train_config.v_w * vloss + train_config.p_w * ploss
                 accelerator.backward(loss)
-                accelerator.clip_grad_value_(
-                    model.parameters(), train_config["grad_clip"]
-                )
+                accelerator.clip_grad_value_(model.parameters(), train_config.grad_clip)
                 optimizer.step()
-                if is_warmup:
+                if need_warmup:
                     scheduler.step()
 
             with torch.no_grad():
