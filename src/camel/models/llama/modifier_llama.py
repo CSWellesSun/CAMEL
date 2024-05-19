@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from typing import Optional, Union, Tuple, List
-from transformers.models.llama import LlamaModel, LlamaConfig
+from transformers.models.llama import LlamaModel, LlamaConfig, LlamaPreTrainedModel
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.utils import logging
@@ -13,8 +13,25 @@ logger = logging.get_logger(__name__)
 
 
 class LlamaCamelModifier(LlamaModel):
-    def __init__(self, config: LlamaConfig, load_embedding=False, model_path=""):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        load_embedding=False,
+        model_path="",
+        combine_bias=True,
+    ):
+        LlamaPreTrainedModel.__init__(self, config)  # pay attention to `self`
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
         self.window_size = config.window_size
+
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.gradient_checkpointing = False
+
+        # compression_layer don't need past key values so `layer_idx` is useless
         self.compression_layer = nn.ModuleList(
             [
                 LlamaDecoderLayer(config, layer_idx)
@@ -27,15 +44,22 @@ class LlamaCamelModifier(LlamaModel):
                 for layer_idx in range(config.num_hidden_layers)
             ]
         )
-        super().__init__(config)
-        del self.layers
+        self.combine_layer = nn.Linear(
+            2 * config.hidden_size, config.hidden_size, bias=combine_bias
+        )
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
         if load_embedding:
             import os
             import json
             from safetensors import safe_open
 
             try:
-                with open(os.path.join(model_path, "model.safetensors.index.json"), "r") as f:
+                with open(
+                    os.path.join(model_path, "model.safetensors.index.json"), "r"
+                ) as f:
                     index_json = json.loads(f.read())
                     emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
                 with safe_open(
@@ -45,7 +69,9 @@ class LlamaCamelModifier(LlamaModel):
                     vocab_size, hidden_dim = tensor_slice.get_shape()
                     tensor = tensor_slice[:, :hidden_dim].float()
             except:
-                with open(os.path.join(model_path, "pytorch_model.bin.index.json"), "r") as f:
+                with open(
+                    os.path.join(model_path, "pytorch_model.bin.index.json"), "r"
+                ) as f:
                     index_json = json.loads(f.read())
                     emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
                 weights = torch.load(os.path.join(model_path, emb_path))
@@ -56,10 +82,11 @@ class LlamaCamelModifier(LlamaModel):
 
     def forward(
         self,
+        hidden_states: torch.FloatTensor = None,  # [bs, seq_len, hidden_size]
         input_ids: torch.LongTensor = None,  # [bs, seq_len]
         attention_mask: Optional[torch.Tensor] = None,  # [bs, seq_len]
-        position_ids: Optional[torch.LongTensor] = None,  # [bs, seq_len]
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,  # None currently
+        inputs_embeds: Optional[torch.FloatTensor] = None,  # [bs, seq_len, hidden_size]
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -98,7 +125,13 @@ class LlamaCamelModifier(LlamaModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        hidden_states = inputs_embeds
+        # TODO: add FC layer
+        hidden_states = self.combine_layer(
+            torch.concat([hidden_states, inputs_embeds], dim=-1)
+        )
+
+        bs, seq_len, hidden_size = hidden_states.shape
+        dtype, device = hidden_states.dtype, hidden_states.device
 
         return_legacy_cache = False
         if use_cache and not isinstance(
@@ -109,12 +142,16 @@ class LlamaCamelModifier(LlamaModel):
                 speculation_past_key_values
             )
 
-        if speculation_past_key_values is None:
+        if speculation_past_key_values.get_seq_length() == 0:
             # Prefill
-            speculation_len = hidden_states.shape[1] // self.window_size
-            compression_len = hidden_states.shape[1] - speculation_len
-            compression_hidden_states = hidden_states[:compression_len]
-            speculation_hidden_states = hidden_states[compression_len:]
+            speculation_len = (
+                hidden_states.shape[1] % self.window_size
+            )  # don't need to compress
+            compression_len = (
+                hidden_states.shape[1] - hidden_states.shape[1] % self.window_size
+            )
+            compression_hidden_states = hidden_states[:, :compression_len, :]
+            speculation_hidden_states = hidden_states[:, compression_len:, :]
         else:
             # Decode
             if (
@@ -122,15 +159,25 @@ class LlamaCamelModifier(LlamaModel):
                 + hidden_states.shape[1] % self.window_size
                 == 0
             ):
+                # have already filled up the window
                 compression_hidden_states = torch.concat(
-                    [speculation_hidden_states, hidden_states]
+                    [speculation_hidden_states, hidden_states], dim=1
                 )
-                speculation_hidden_states = torch.tensor([], dtype=inputs_embeds.dtype)
+                speculation_hidden_states = torch.empty(
+                    (bs, 0, hidden_size),
+                    dtype=dtype,
+                    device=device,
+                )
             else:
                 speculation_hidden_states = torch.concat(
-                    [speculation_hidden_states, hidden_states]
+                    [speculation_hidden_states, hidden_states], dim=1
                 )
-                compression_hidden_states = torch.tensor([], dtype=inputs_embeds.dtype)
+                compression_hidden_states = torch.empty(
+                    (bs, 0, hidden_size),
+                    dtype=dtype,
+                    device=device,
+                )
+        window_hidden_states = speculation_hidden_states
 
         # Compression Layer
         if compression_len != 0:
@@ -143,9 +190,10 @@ class LlamaCamelModifier(LlamaModel):
                 past_seen_compress_tokens * self.window_size,
                 past_seen_compress_tokens * self.window_size + compression_len,
                 dtype=torch.long,
-            ).unsqueeze(0)
+                device=device,
+            )[None, :].expand(hidden_states.shape[0], -1)
             compression_attention_mask = self._update_compress_causal_mask(
-                compression_len
+                compression_len, hidden_states, attention_mask
             )
 
             all_hidden_states = () if output_hidden_states else None
@@ -164,8 +212,8 @@ class LlamaCamelModifier(LlamaModel):
                         compression_position_ids,
                         None,
                         output_attentions,
-                        use_cache,
-                        compression_position_ids,
+                        False,
+                        None,
                     )
                 else:
                     layer_outputs = decoder_layer(
@@ -174,14 +222,11 @@ class LlamaCamelModifier(LlamaModel):
                         position_ids=compression_position_ids,
                         past_key_value=None,
                         output_attentions=output_attentions,
-                        use_cache=use_cache,
-                        cache_position=compression_position_ids,
+                        use_cache=False,
+                        cache_position=None,  # DynamicCache don't need
                     )
 
                 hidden_states = layer_outputs[0]
-
-                if use_cache:
-                    next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
                 if output_attentions:
                     all_self_attns += (layer_outputs[1],)
@@ -189,37 +234,52 @@ class LlamaCamelModifier(LlamaModel):
             hidden_states = self.norm(hidden_states)
             speculation_hidden_states = torch.concat(
                 [
-                    hidden_states[(self.window_size - 1) :: self.window_size],
+                    hidden_states[:, (self.window_size - 1) :: self.window_size, :],
                     speculation_hidden_states,
-                ]
+                ],
+                dim=1,
             )
-            speculation_len += compression_len // 4
+            past_seen_compress_tokens += compression_len // self.window_size
 
         # Speculation Layer
         if past_seen_compress_tokens != 0:
             speculation_position_ids = torch.arange(
                 self.window_size - 1,
                 past_seen_compress_tokens * self.window_size,
-                device=inputs_embeds.device,
+                device=device,
                 step=self.window_size,
                 dtype=torch.long,
             )
         else:
-            speculation_position_ids = torch.LongTensor([], dtype=torch)
+            speculation_position_ids = torch.empty(
+                (bs, 0, hidden_size), device=device, dtype=torch.long
+            )
 
-        cur_speculation_position_ids = torch.arange(
-            speculation_position_ids.shape[0],
-            speculation_position_ids.shape[0] + speculation_len,
-            dtype=torch.long,
+        if speculation_len != 0:
+            cur_speculation_position_ids = torch.arange(
+                speculation_position_ids.shape[0],
+                speculation_position_ids.shape[0] + speculation_len,
+                dtype=torch.long,
+                device=device,
+            )
+            speculation_position_ids = torch.concat(
+                [speculation_position_ids, cur_speculation_position_ids]
+            )
+
+        speculation_position_ids = speculation_position_ids[None, :].expand(
+            hidden_states.shape[0], -1
         )
-        speculation_position_ids = torch.concat(
-            [speculation_position_ids, cur_speculation_position_ids]
-        ).unsqueeze(0)
 
+        cache_position = torch.arange(
+            speculation_past_key_values.get_seq_length(),
+            speculation_past_key_values.get_seq_length()
+            + speculation_hidden_states.shape[1],
+            device=device,
+        )
         speculation_causal_mask = self._update_causal_mask(
-            attention_mask,
+            attention_mask=torch.gather(attention_mask, 1, speculation_position_ids),
             input_tensor=speculation_hidden_states,
-            cache_position=cur_speculation_position_ids,
+            cache_position=cache_position,
             past_key_values=speculation_past_key_values,
             output_attentions=output_attentions,
         )
@@ -237,7 +297,7 @@ class LlamaCamelModifier(LlamaModel):
                     speculation_past_key_values,
                     output_attentions,
                     use_cache,
-                    speculation_position_ids,
+                    cache_position,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -247,7 +307,7 @@ class LlamaCamelModifier(LlamaModel):
                     past_key_value=speculation_past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
-                    cache_position=speculation_position_ids,
+                    cache_position=cache_position,
                 )
 
             hidden_states = layer_outputs[0]
@@ -277,19 +337,39 @@ class LlamaCamelModifier(LlamaModel):
         return CamelModifierOutput(
             last_hidden_state=hidden_states,
             speculation_past_key_values=next_cache,
-            window_hidden_states=all_hidden_states,
-            all_hidden_states=all_hidden_states,
+            window_hidden_states=window_hidden_states,
+            hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
 
-    def _update_compress_causal_mask(self, seq_len):
+    def _update_compress_causal_mask(self, seq_len, input_tensor, attention_mask):
+        dtype, device = input_tensor.dtype, input_tensor.device
+        min_dtype = torch.finfo(dtype).min
+        bs = input_tensor.shape[0]
+
         full_casual_mask = torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1
+            torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1
         )
-        block_mask = torch.arange(seq_len).unsqueeze(0) // self.window_size
+        block_mask = (
+            torch.arange(seq_len, device=device).unsqueeze(0) // self.window_size
+        )
         block_mask = block_mask != block_mask.T
         casual_block_mask = torch.logical_or(full_casual_mask, block_mask)
-        mask = torch.where(casual_block_mask, float("-inf"), 0)
+        mask = torch.where(casual_block_mask, min_dtype, 0)
+        mask = mask[None, None, :, :].expand(bs, 1, -1, -1)
+        if attention_mask is not None:
+            # `attention_mask` of shape [bs, seq_len] indicates which token is padding,
+            # so add `mask` and `attention_mask`, and we can check which position has
+            # both value 0 (padding but casual), and we can mask it
+            mask = mask.clone()  # copy to contiguous memory for in-place edit
+            mask_length = mask.shape[-1]
+            padding_mask = (
+                mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
+            )
+            padding_mask = padding_mask == 0
+            mask[:, :, :, :mask_length] = mask[:, :, :, :mask_length].masked_fill(
+                padding_mask, min_dtype
+            )
         return mask
 
     def generate():

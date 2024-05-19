@@ -282,7 +282,7 @@ if __name__ == "__main__":
     if accelerator.is_main_process:
         import wandb
 
-        wandb.init(project="CAMEL", config=asdict(train_config))
+        # wandb.init(project="CAMEL", config=asdict(train_config))
 
     baseconfig = AutoConfig.from_pretrained(args.model_path)
     head = torch.nn.Linear(baseconfig.hidden_size, baseconfig.vocab_size, bias=False)
@@ -393,6 +393,7 @@ if __name__ == "__main__":
                     input_ids=data["input_ids"],
                     attention_mask=data["attention_mask"],
                 )
+                predict = predict.last_hidden_state
                 with torch.no_grad():
                     target_head = head(data["target"])
                     target_p = nn.Softmax(dim=2)(target_head)
@@ -400,6 +401,7 @@ if __name__ == "__main__":
                 out_head = head(predict)
                 out_logp = nn.LogSoftmax(dim=2)(out_head)
                 loss_mask = data["loss_mask"][:, :, None]
+                # TODO: fix the bug, target_p is 2048 but out_logp is 512
                 plogp = target_p * out_logp
                 ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (
                     loss_mask.sum() + 1e-5
