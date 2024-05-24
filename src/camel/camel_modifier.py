@@ -1,3 +1,3 @@
-from camel.models.llama.modifier_llama import LlamaCamelModifier
+from src.camel.models.llama.modifier_llama import Model
 
-CamelModifier = LlamaCamelModifier
+CamelModifier = Model

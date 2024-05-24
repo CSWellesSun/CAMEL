@@ -1,3 +1,4 @@
+# Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/ge_data/ge_data_all_llama2chat.py
 import argparse
 import torch
 from tqdm import tqdm

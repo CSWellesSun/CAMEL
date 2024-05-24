@@ -1,3 +1,4 @@
+# Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/train/main.py
 import argparse
 import os
 import json
@@ -282,7 +283,7 @@ if __name__ == "__main__":
     if accelerator.is_main_process:
         import wandb
 
-        # wandb.init(project="CAMEL", config=asdict(train_config))
+        wandb.init(project="CAMEL", config=asdict(train_config))
 
     baseconfig = AutoConfig.from_pretrained(args.model_path)
     head = torch.nn.Linear(baseconfig.hidden_size, baseconfig.vocab_size, bias=False)
