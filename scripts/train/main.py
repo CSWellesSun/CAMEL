@@ -402,7 +402,6 @@ if __name__ == "__main__":
                 out_head = head(predict)
                 out_logp = nn.LogSoftmax(dim=2)(out_head)
                 loss_mask = data["loss_mask"][:, :, None]
-                # TODO: fix the bug, target_p is 2048 but out_logp is 512
                 plogp = target_p * out_logp
                 ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (
                     loss_mask.sum() + 1e-5
