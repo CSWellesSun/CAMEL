@@ -249,7 +249,7 @@ def getkacc(model, data, head, max_length=5):
                     dim=1,
                 )
 
-    acc = [correct[i] / total[i] for i in range(len(correct))]
+    acc = [correct[i] / total[i] for i in range(len(correct)) if total[i] != 0]
     return acc
 
 
@@ -270,6 +270,7 @@ if __name__ == "__main__":
         type=str,
         default="../../configs/camel_config/llama_2_chat_7B_config.json",
     )
+    parser.add_argument("--wandb-project", type=str, default=None)
     args = parser.parse_args()
 
     with open(args.train_config_path, "r") as f:
@@ -280,10 +281,10 @@ if __name__ == "__main__":
         mixed_precision="bf16",
         gradient_accumulation_steps=train_config.gradient_accumulation_steps,
     )
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and args.wandb_project is not None:
         import wandb
 
-        wandb.init(project="CAMEL", config=asdict(train_config))
+        wandb.init(project=args.wandb_project, config=asdict(train_config))
 
     baseconfig = AutoConfig.from_pretrained(args.model_path)
     head = torch.nn.Linear(baseconfig.hidden_size, baseconfig.vocab_size, bias=False)
@@ -378,7 +379,7 @@ if __name__ == "__main__":
         model, head, optimizer, train_loader, test_loader = accelerator.prepare(
             model, head, optimizer, train_loader, test_loader
         )
-    for epoch in range(num_epochs + 1):
+    for epoch in range(num_epochs):
         top_3acc = [0 for _ in range(3)]
         correct = 0
         total = 0
@@ -394,7 +395,6 @@ if __name__ == "__main__":
                     input_ids=data["input_ids"],
                     attention_mask=data["attention_mask"],
                 )
-                predict = predict.last_hidden_state
                 with torch.no_grad():
                     target_head = head(data["target"])
                     target_p = nn.Softmax(dim=2)(target_head)
@@ -442,7 +442,8 @@ if __name__ == "__main__":
                 }
                 for id, i in enumerate(top_3acc):
                     logdict[f"train/top_{id + 1}_acc"] = topkacc[id].item() / ct
-                wandb.log(logdict)
+                if args.wandb_project is not None:
+                    wandb.log(logdict)
 
             del ploss, vloss
             epoch_loss += loss.item()
@@ -455,17 +456,19 @@ if __name__ == "__main__":
         top_3acc = accelerator.gather_for_metrics(top_3acc)
         if accelerator.is_local_main_process:
             for id, i in enumerate(top_3acc):
-                wandb.log({f"train/epochtop_{id + 1}_acc": i.sum().item() / total})
+                if args.wandb_project is not None:
+                    wandb.log({f"train/epochtop_{id + 1}_acc": i.sum().item() / total})
         if accelerator.is_local_main_process:
             print(
                 "Epoch [{}/{}], Loss: {:.4f}".format(epoch + 1, num_epochs, epoch_loss)
             )
             print("Train Accuracy: {:.2f}%".format(100 * correct / total))
-            wandb.log(
-                {"train/epochacc": correct / total, "train/epochloss": epoch_loss}
-            )
+            if args.wandb_project is not None:
+                wandb.log(
+                    {"train/epochacc": correct / total, "train/epochloss": epoch_loss}
+                )
 
-        if (epoch + 1) % train_config.save_freq:
+        if (epoch + 1) % train_config.save_freq == 0:
             top_3acc = [0 for _ in range(3)]
             correct = 0
             total = 0
@@ -526,7 +529,8 @@ if __name__ == "__main__":
             if accelerator.is_local_main_process:
                 for id, i in enumerate(mean_acces):
                     mean_acc = i.mean().item()
-                    wandb.log({f"test/{id}_acc": mean_acc})
+                    if args.wandb_project is not None:
+                        wandb.log({f"test/{id}_acc": mean_acc})
 
             correct, total = torch.tensor(correct).cuda(), torch.tensor(total).cuda()
             correct, total = accelerator.gather_for_metrics((correct, total))
@@ -534,7 +538,8 @@ if __name__ == "__main__":
             top_3acc = accelerator.gather_for_metrics(top_3acc)
             if accelerator.is_local_main_process:
                 for id, i in enumerate(top_3acc):
-                    wandb.log({f"test/top_{id + 1}_acc": i.sum().item() / total})
+                    if args.wandb_project is not None:
+                        wandb.log({f"test/top_{id + 1}_acc": i.sum().item() / total})
             epoch_loss /= num_batches
             if accelerator.is_local_main_process:
                 print(
@@ -543,9 +548,10 @@ if __name__ == "__main__":
                     )
                 )
                 print("Test Accuracy: {:.2f}%".format(100 * correct / total))
-                wandb.log(
-                    {"test/epochacc": correct / total, "test/epochloss": epoch_loss}
-                )
+                if args.wandb_project is not None:
+                    wandb.log(
+                        {"test/epochacc": correct / total, "test/epochloss": epoch_loss}
+                    )
                 accelerator.save_state(
                     output_dir=f"{args.checkpoint_dir}/state_{epoch}"
                 )

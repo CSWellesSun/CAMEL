@@ -6,7 +6,7 @@
     "std": 0.2,
     "num_workers": 2,
     "max_len": 2048,
-    "bs": 4,
+    "bs": 1,
     "need_warmup": true,
     "num_epochs": 20,
     "num_warmup_steps": 2000,

@@ -27,8 +27,8 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
-from utils.choices import mc_sim_7b_63
-from utils.tree import generate_tree_buffers
+from camel.utils.choices import mc_sim_7b_63
+from camel.utils.tree import generate_tree_buffers
 
 top_k = 10
 
@@ -594,7 +594,7 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, config, load_emb=False, path=None, bias=True):
+    def __init__(self, config, load_embedding=False, model_path=None, bias=True):
         super().__init__()
 
         self.gradient_checkpointing = True
@@ -605,25 +605,29 @@ class Model(nn.Module):
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.original_hidden_size, self.padding_idx
         )
-        if load_emb:
+        if load_embedding:
             from safetensors import safe_open
             import json
 
             try:
-                with open(os.path.join(path, "model.safetensors.index.json"), "r") as f:
+                with open(
+                    os.path.join(model_path, "model.safetensors.index.json"), "r"
+                ) as f:
                     index_json = json.loads(f.read())
                     emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
                 with safe_open(
-                    os.path.join(path, emb_path), framework="pt", device="cpu"
+                    os.path.join(model_path, emb_path), framework="pt", device="cpu"
                 ) as f:
                     tensor_slice = f.get_slice("model.embed_tokens.weight")
                     vocab_size, hidden_dim = tensor_slice.get_shape()
                     tensor = tensor_slice[:, :hidden_dim].float()
             except:
-                with open(os.path.join(path, "pytorch_model.bin.index.json"), "r") as f:
+                with open(
+                    os.path.join(model_path, "pytorch_model.bin.index.json"), "r"
+                ) as f:
                     index_json = json.loads(f.read())
                     emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
-                weights = torch.load(os.path.join(path, emb_path))
+                weights = torch.load(os.path.join(model_path, emb_path))
                 tensor = weights["model.embed_tokens.weight"].float()
             self.embed_tokens.weight.data = tensor
 
@@ -835,6 +839,7 @@ class Model(nn.Module):
                     hidden_states,
                     compression_attention_mask,
                     position_ids,
+                    use_reentrant=False,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -875,6 +880,7 @@ class Model(nn.Module):
                     hidden_states,
                     speculation_attention_mask,
                     position_ids,
+                    use_reentrant=False,
                 )
             else:
                 layer_outputs = decoder_layer(

@@ -7,16 +7,16 @@ import os
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel, PretrainedConfig, AutoConfig
-from models.llama.modeling_llama import LlamaForCausalLM as KVLlamaForCausalLM
-from utils.logits_precessor import *
-from utils.tree import *
-from utils.cache import initialize_past_key_values
-from utils.choices import mc_sim_7b_63
 from transformers import AutoTokenizer
 from huggingface_hub import hf_hub_download
-from models.llama.modifier_llama import Model
-from models.llama.configuration_llama import EConfig
-from huggingface_hub import hf_hub_download
+
+from camel.models.llama.modeling_llama import LlamaForCausalLM as KVLlamaForCausalLM
+from camel.utils.logits_precessor import *
+from camel.utils.tree import *
+from camel.utils.cache import initialize_past_key_values
+from camel.utils.choices import mc_sim_7b_63
+from camel.models.llama.modifier_llama import Model
+from camel.models.llama.configuration_llama import EConfig
 
 
 class EaModel(nn.Module):

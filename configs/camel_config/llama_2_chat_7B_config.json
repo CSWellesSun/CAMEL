@@ -5,6 +5,7 @@
   "bos_token_id": 1,
   "eos_token_id": 2,
   "hidden_act": "silu",
+  "original_hidden_size": 4096,
   "hidden_size": 256,
   "initializer_range": 0.02,
   "intermediate_size": 768,

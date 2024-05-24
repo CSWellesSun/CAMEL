@@ -138,6 +138,7 @@ proc_data
 runs
 /runs_old
 /wandb
+**/wandb
 /examples/runs
 /examples/**/*.args
 /examples/rag/sweep
@@ -167,3 +168,6 @@ tags
 
 # ruff
 .ruff_cache
+
+# bash scripts
+*.sh
