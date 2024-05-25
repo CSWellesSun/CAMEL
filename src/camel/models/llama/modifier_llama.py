@@ -593,7 +593,7 @@ class LlamaDecoderLayer(nn.Module):
         return outputs
 
 
-class Model(nn.Module):
+class LlamaModifier(nn.Module):
     def __init__(self, config, load_embedding=False, model_path=None, bias=True):
         super().__init__()
 

@@ -2,7 +2,7 @@
 from transformers.configuration_utils import PretrainedConfig
 
 
-class EConfig(PretrainedConfig):
+class CamelConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`LlamaModel`]. It is used to instantiate an LLaMA
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the

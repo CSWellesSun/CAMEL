@@ -9,7 +9,7 @@ import shortuuid
 from tqdm import tqdm
 
 from fastchat.model import get_conversation_template
-from camel.camel_model import EaModel
+from camel.camel_model import CamelModel
 from camel.utils.cache import initialize_past_key_values
 from camel.utils.tree import *
 from camel.utils.choices import *
@@ -205,7 +205,7 @@ def get_model_answers(
     tree_choices,
 ):
 
-    model = EaModel.from_pretrained(
+    model = CamelModel.from_pretrained(
         base_model_path=base_model_path,
         ea_model_path=camel_model_path,
         torch_dtype=torch.float16,

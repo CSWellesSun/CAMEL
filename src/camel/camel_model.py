@@ -15,17 +15,17 @@ from camel.utils.logits_precessor import *
 from camel.utils.tree import *
 from camel.utils.cache import initialize_past_key_values
 from camel.utils.choices import mc_sim_7b_63
-from camel.models.llama.modifier_llama import Model
-from camel.models.llama.configuration_llama import EConfig
+from camel.camel_modifier import CamelModifier
+from camel.models.llama.configuration_llama import CamelConfig
 
 
-class EaModel(nn.Module):
+class CamelModel(nn.Module):
 
     def __init__(
         self,
         base_model,
         base_model_name_or_path,
-        ea_model_path,
+        modifier_path,
     ):
 
         super().__init__()
@@ -35,32 +35,29 @@ class EaModel(nn.Module):
         self.vocab_size = base_model.lm_head.weight.shape[0]
         self.base_model_name_or_path = base_model_name_or_path
         self.tokenizer = AutoTokenizer.from_pretrained(self.base_model_name_or_path)
-        config = EConfig.from_pretrained(ea_model_path)
-        with open(ea_model_path, "r") as f:
+        config = CamelConfig.from_pretrained(modifier_path)
+        with open(modifier_path, "r") as f:
             con = json.loads(f.read())
         try:
             bias = con["bias"]
         except:
             bias = True
-        self.ea_layer = Model(config, bias=bias)
+        self.modifier = CamelModifier(config, bias=bias)
 
         low_memory = False
 
         device = base_model.model.layers[-1].self_attn.q_proj.weight.device
         if device != base_model.lm_head.weight.device:
-            self.ea_layer.diff_device = True
+            self.modifier.diff_device = True
             if not low_memory:
-                # self.ea_layer.head=nn.Linear(base_model.lm_head.in_features,base_model.lm_head.out_features,bias=False)
-                # self.ea_layer.head.weight=copy.deepcopy(base_model.lm_head.weight)
-                # self.ea_layer.head.to(device)
-                self.ea_layer.headweight = base_model.lm_head.weight.clone().to(device)
+                self.modifier.headweight = base_model.lm_head.weight.clone().to(device)
             else:
-                self.ea_layer.layer_device = device
+                self.modifier.layer_device = device
 
         else:
-            self.ea_layer.diff_device = False
-        self.ea_layer.to(self.base_model.dtype).to(device)
-        self.ea_layer.init_tree()
+            self.modifier.diff_device = False
+        self.modifier.to(self.base_model.dtype).to(device)
+        self.modifier.init_tree()
 
     def get_tokenizer(self):
         """Get the tokenizer of the base model.
@@ -73,28 +70,28 @@ class EaModel(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        Type="LLaMA",
+        type="LLaMA",
         base_model_path=None,
-        ea_model_path=None,
+        modifier_path=None,
         **kwargs,
     ):
-        Type = AutoConfig.from_pretrained(base_model_path).architectures[0]
-        if Type == "LlamaForCausalLM":
+        type = AutoConfig.from_pretrained(base_model_path).architectures[0]
+        if type == "LlamaForCausalLM":
             base_model = KVLlamaForCausalLM.from_pretrained(base_model_path, **kwargs)
         else:
             raise ValueError(f"Only support base model of Llama architecture")
 
-        configpath = os.path.join(ea_model_path, "config.json")
+        configpath = os.path.join(modifier_path, "config.json")
         if not os.path.exists(configpath):
-            configpath = hf_hub_download(ea_model_path, "config.json")
+            configpath = hf_hub_download(modifier_path, "config.json")
         model = cls(base_model, base_model_path, configpath)
-        load_model_path = os.path.join(ea_model_path, "pytorch_model.bin")
+        load_model_path = os.path.join(modifier_path, "pytorch_model.bin")
         if not os.path.exists(load_model_path):
-            load_model_path = hf_hub_download(ea_model_path, "pytorch_model.bin")
-        ea_layer_state_dict = torch.load(
+            load_model_path = hf_hub_download(modifier_path, "pytorch_model.bin")
+        modifier_state_dict = torch.load(
             load_model_path, map_location=base_model.device
         )
-        model.ea_layer.load_state_dict(ea_layer_state_dict, strict=True)
+        model.modifier.load_state_dict(modifier_state_dict, strict=True)
 
         return model
 
@@ -133,7 +130,7 @@ class EaModel(nn.Module):
             input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
             # Clone the output hidden states
 
-            ea_logits = self.ea_layer.topK_genrate(
+            ea_logits = self.modifier.topK_genrate(
                 hidden_states, input_ids, self.base_model.lm_head, logits_processor
             )
             if output_orig:
@@ -163,7 +160,7 @@ class EaModel(nn.Module):
         # assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
         # Avoid modifying the input_ids in-place
         input_ids = input_ids.clone()
-        self.ea_layer.reset_kv()
+        self.modifier.reset_kv()
 
         if hasattr(self, "tree_choices") and self.tree_choices == tree_choices:
             tree_buffers = self.tree_buffers
