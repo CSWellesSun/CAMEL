@@ -1,11 +1,8 @@
-# Source: https://github.com/FasterDecoding/Medusa/blob/main/medusa/model/utils_legacy.py
-import copy
-import random
-
-# typing
-from typing import List, Tuple
-import time
+# Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/model/utils_c.py
 import torch
+import random
+import copy
+from typing import List
 
 TOPK = 10  # topk for sparse tree
 
@@ -37,7 +34,74 @@ def pad_path(path: List[int], length: int, pad_value: int = -2) -> List[int]:
     return path + [pad_value] * (length - len(path))
 
 
-def generate_tree_buffers(tree_choices, device="cuda"):
+class node:
+    def __init__(self, parent=None, value=None, dict_key=None):
+        self.parent = parent
+        self.value = value
+        if parent:
+            self.depth = parent.depth + 1
+            parent.children.append(self)
+        else:
+            self.depth = 0
+        self.children = []
+        self.dict_key = dict_key
+
+    def is_leaf(self):
+        return len(self.children) == 0
+
+    def all_index(self):
+        if not self.parent.parent:
+            return [self.index]
+        else:
+            return self.parent.all_index() + [self.index]
+
+
+class Tree:
+    def __init__(self, tree_list):
+        sorted_tree_list = sorted(tree_list, key=lambda x: (len(x), x))
+        self.root = node()
+        self.node_dic = {}
+        for tree_node in sorted_tree_list:
+            cur_value = tree_node[-1]
+            if len(tree_node) == 1:
+                cur_node = node(
+                    parent=self.root, value=cur_value, dict_key=tuple(tree_node)
+                )
+            else:
+                cur_parent = self.node_dic[tuple(tree_node[:-1])]
+                cur_node = node(
+                    parent=cur_parent, value=cur_value, dict_key=tuple(tree_node)
+                )
+            self.node_dic[tuple(tree_node)] = cur_node
+        self.indexnode()
+
+    def max_depth(self):
+        return max([item.depth for item in self.node_dic.values()])
+
+    def num_node_wchild(self):
+        num_c = 0
+        for item in self.node_dic.values():
+            if not item.is_leaf():
+                num_c += 1
+        return num_c
+
+    def get_node_wchild(self):
+        ns = []
+        for item in self.node_dic.values():
+            if not item.is_leaf():
+                ns.append(item)
+        return ns
+
+    def indexnode(self):
+        cur_index = 0
+        for key in self.node_dic:
+            cur_node = self.node_dic[key]
+            if not cur_node.is_leaf():
+                cur_node.index = cur_index
+                cur_index += 1
+
+
+def generate_tree_buffers_base(tree_choices, device="cuda"):
     sorted_tree_choices = sorted(tree_choices, key=lambda x: (len(x), x))
     tree_len = len(sorted_tree_choices) + 1
 
@@ -62,9 +126,7 @@ def generate_tree_buffers(tree_choices, device="cuda"):
                 continue
             ancestor_idx = []
             for c in range(len(cur_tree_choice) - 1):
-                ancestor_idx.append(
-                    sorted_tree_choices.index(cur_tree_choice[: c + 1]) + 1
-                )
+                ancestor_idx.append(sorted_tree_choices.index(cur_tree_choice[:c + 1]) + 1)
             tree_attn_mask[j + start + 1, ancestor_idx] = 1
         start += depth_counts[i]
 
@@ -101,7 +163,7 @@ def generate_tree_buffers(tree_choices, device="cuda"):
     tree_position_ids = torch.zeros(tree_len, dtype=torch.long)
     start = 0
     for i in range(len(depth_counts)):
-        tree_position_ids[start + 1 : start + depth_counts[i] + 1] = i + 1
+        tree_position_ids[start + 1: start + depth_counts[i] + 1] = i + 1
         start += depth_counts[i]
 
     retrieve_indices_nest = []
@@ -113,35 +175,15 @@ def generate_tree_buffers(tree_choices, device="cuda"):
             continue
         else:
             for c in range(len(cur_tree_choice)):
-                retrieve_indice.append(
-                    sorted_tree_choices.index(cur_tree_choice[: c + 1])
-                )
-                retrieve_paths.append(cur_tree_choice[: c + 1])
+                retrieve_indice.append(sorted_tree_choices.index(cur_tree_choice[:c + 1]))
+                retrieve_paths.append(cur_tree_choice[:c + 1])
         retrieve_indices_nest.append(retrieve_indice)
     max_length = max([len(x) for x in retrieve_indices_nest])
     retrieve_indices = [pad_path(path, max_length) for path in retrieve_indices_nest]
     retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
     retrieve_indices = retrieve_indices + 1
-    retrieve_indices = torch.cat(
-        [
-            torch.zeros((retrieve_indices.shape[0], 1), dtype=torch.long),
-            retrieve_indices,
-        ],
-        dim=1,
-    )
-
-    maxitem = retrieve_indices.max().item() + 5
-
-    def custom_sort(lst):
-        # sort_keys=[len(list)]
-        sort_keys = []
-        for i in range(len(lst)):
-            sort_keys.append(lst[i] if lst[i] >= 0 else maxitem)
-        return sort_keys
-
-    retrieve_indices = retrieve_indices.tolist()
-    retrieve_indices = sorted(retrieve_indices, key=custom_sort)
-    retrieve_indices = torch.tensor(retrieve_indices, dtype=torch.long)
+    retrieve_indices = torch.cat([torch.zeros((retrieve_indices.shape[0], 1), dtype=torch.long), retrieve_indices],
+                                 dim=1)
 
     p_indices = torch.tensor(p_indices)
     p_indices_new = p_indices[retrieve_indices]
@@ -176,16 +218,107 @@ def generate_tree_buffers(tree_choices, device="cuda"):
 
     # Move the tensors in the dictionary to the specified device
     tree_buffers = {
-        k: (
-            v.clone().to(device)
-            if isinstance(v, torch.Tensor)
-            else torch.tensor(v, device=device)
-        )
+        k: v.clone().to(device)
+        if isinstance(v, torch.Tensor)
+        else torch.tensor(v, device=device)
         for k, v in tree_buffers.items()
     }
     tree_buffers["p_indices"] = p_indices_new
     tree_buffers["b_indices"] = b_indices_new
     return tree_buffers
+
+
+def generate_tree_buffers_camel(tree_choices, device="cuda"):
+    tree = Tree(tree_choices)
+    sorted_tree_choices = sorted(tree_choices, key=lambda x: (len(x), x))
+    tree_len = tree.num_node_wchild()
+
+    max_depth = tree.max_depth()
+    nodes_wc = tree.get_node_wchild()
+
+    depth_counts = [0 for _ in range(max_depth - 1)]
+    for x in nodes_wc:
+        depth_counts[x.depth - 1] += 1
+    depth_counts_sum = [sum(depth_counts[: i + 1]) for i in range(len(depth_counts))]
+
+    tree_attn_mask = torch.eye(tree_len, tree_len)
+
+    for id, x in enumerate(nodes_wc):
+        tree_attn_mask[id, x.all_index()] = 1
+
+    tree_attn_mask_list0 = [tree_attn_mask[:ml, :ml] for ml in depth_counts_sum]
+    tree_attn_mask_list = []
+    for id, x in enumerate(tree_attn_mask_list0):
+        x = x[-depth_counts[id] :]
+        tree_attn_mask_list.append(x)
+
+    tree_indices_list = [torch.zeros(ml, dtype=torch.long) for ml in depth_counts]
+    repeat_nums = [[] for _ in depth_counts]
+    start = 0
+    bias = 0
+    for i in range(len(depth_counts)):
+        bias = 0
+        repeat_j = 0
+        for j in range(depth_counts[i]):
+            cur_node = nodes_wc[start + j]
+            cur_parent = cur_node.parent
+
+            if j != 0:
+                if cur_parent != parent:
+                    bias += 1
+                    parent = cur_parent
+                    repeat_nums[i].append(j - repeat_j)
+                    repeat_j = j
+            else:
+                parent = cur_parent
+            tree_indices_list[i][j] = cur_node.value + TOPK * (bias)
+        repeat_nums[i].append(j - repeat_j + 1)
+        start += depth_counts[i]
+
+    position_ids = [torch.zeros(ml, dtype=torch.long) for ml in depth_counts]
+
+    # start = 0
+    # for i in range(len(depth_counts)):
+    #     position_ids[start: start + depth_counts[i]] = i
+    #     start += depth_counts[i]
+
+    tree_buffers = {
+        "attn_mask": [i.unsqueeze(0).unsqueeze(0) for i in tree_attn_mask_list],
+        "tree_indices": tree_indices_list,
+        "position_ids": position_ids,
+        "repeat_nums": repeat_nums,
+    }
+
+    # Move the tensors in the dictionary to the specified device
+    tree_buffers = {
+        k: (
+            [i.clone().to(device) for i in v]
+            if isinstance(v[0], torch.Tensor)
+            else (torch.tensor(v, device=device) if isinstance(v, torch.Tensor) else v)
+        )
+        for k, v in tree_buffers.items()
+    }
+    return tree_buffers
+
+
+def reset_past_key_values(passed_key_values: List[torch.Tensor]) -> List[torch.Tensor]:
+    """
+    Resets the current lengths in the passed key-values to zero.
+
+    This function is designed to be used during the evaluation of a baseline model.
+    It iterates through each layer's key-values and sets their current lengths to zero,
+    effectively resetting their state.
+
+    Args:
+    - passed_key_values (list of torch.Tensor): Contains past hidden states and past attention values for each layer.
+
+    Returns:
+    - passed_key_values (list of torch.Tensor): Updated past hidden states and past attention values with reset lengths.
+    """
+    for i in range(len(passed_key_values)):
+        for j in range(2):
+            passed_key_values[i][j].current_length.fill_(0)
+    return passed_key_values
 
 
 def initialize_tree(
@@ -208,7 +341,7 @@ def reset_tree_mode(
     model.base_model.model.tree_mode = None
 
 
-def reset_past_key_values(passed_key_values: List[torch.Tensor]) -> List[torch.Tensor]:
+def reset_past_key_values(passed_key_values):
     """
     Resets the current lengths in the passed key-values to zero.
 
@@ -244,7 +377,7 @@ def generate_candidates(
     tree_candidates_ext = torch.cat(
         [
             tree_candidates,
-            torch.zeros((1), dtype=torch.long, device=tree_candidates.device) - 1,
+            torch.zeros((1), dtype=torch.long, device=tree_candidates.device),
         ],
         dim=0,
     )
@@ -302,15 +435,17 @@ def tree_decoding(
 
 
 def evaluate_posterior(
-    logits: torch.Tensor,
-    candidates: torch.Tensor,
+    logits,
+    candidates,
     logits_processor,
     cart_candidates_prob,
+    alpha,
+    alpha_num,
     op,
     p_indices,
     tree_candidates,
     b_indices,
-) -> Tuple[torch.Tensor, int]:
+):
     """
     Evaluate the posterior probabilities of the candidates based on the provided logits and choose the best candidate.
 
@@ -342,6 +477,15 @@ def evaluate_posterior(
             best_candidate = torch.tensor(0, dtype=torch.long, device=candidates.device)
         else:
             best_candidate = torch.argmax(candidates_accept_length).to(torch.long)
+
+        choice_cand = candidates[best_candidate]
+        max_len = torch.count_nonzero(choice_cand)
+        for cand_id in range(len(alpha)):
+            if cand_id < accept_length:
+                alpha[cand_id] += 1
+            if cand_id <= accept_length and cand_id < max_len:
+                alpha_num[cand_id] += 1
+
         return best_candidate, accept_length, logits[best_candidate, accept_length]
 
     else:
@@ -349,25 +493,24 @@ def evaluate_posterior(
         accept_length = 1
         accept_cand = candidates[0][:1]
         best_candidate = 0
+        # breakflag=False
         for i in range(1, candidates.shape[1]):
-            if i != accept_length:
-                break
-            adjustflag = False
             is_eq = (candidates[:, :accept_length] == accept_cand).all(dim=1)
+            if i != accept_length:
+                # breakflag=True
+                break
             fi = torch.nonzero(is_eq, as_tuple=True)[0][0]
             gt_logits = logits[fi, i - 1][None]
             gt_logits = logits_processor(None, gt_logits)[0]
             gtp = torch.softmax(gt_logits, dim=0)
-            candidates_set = []
+            adjustflag = False
             for j in range(candidates.shape[0]):
                 if is_eq[j]:
-                    x = candidates[j, i]
-                    xi = x.item()
-                    if xi in candidates_set or xi == -1:
-                        continue
-                    candidates_set.append(xi)
                     r = random.random()
-                    px = gtp[xi]
+                    x = candidates[j, i]
+                    if x == 0:
+                        continue
+                    px = gtp[x]
                     qx = cart_candidates_prob[j, i]
                     if qx <= 0:
                         continue
@@ -383,17 +526,31 @@ def evaluate_posterior(
                         if len(b) > 0:
                             mask = tree_candidates[0][b]
                             q[mask] = 0
-                            q = q / q.sum()
+                            q = q / (q.sum() + 1e-5)
                         gtp = gtp - q
                         gtp[gtp < 0] = 0
                         gtp = gtp / gtp.sum()
+                        # has_nan = torch.isnan(gtp).any()
+                        # if has_nan:
+                        #     print(1)
                         adjustflag = True
-        if adjustflag and accept_length != candidates.shape[1]:
+        if adjustflag:
             sample_p = gtp
         else:
             gt_logits = logits[best_candidate, accept_length - 1]
             sample_p = torch.softmax(gt_logits, dim=0)
-        return torch.tensor(best_candidate), accept_length - 1, sample_p
+
+        accept_length = accept_length - 1
+
+        choice_cand = candidates[best_candidate]
+        max_len = torch.count_nonzero(choice_cand)
+        for cand_id in range(len(alpha)):
+            if cand_id < accept_length:
+                alpha[cand_id] += 1
+            if cand_id <= accept_length and cand_id < max_len:
+                alpha_num[cand_id] += 1
+
+        return torch.tensor(best_candidate), accept_length, sample_p
 
 
 @torch.no_grad()
@@ -457,7 +614,7 @@ def update_inference_inputs(
         token = torch.argmax(prob)
         token = token[None, None]
     # hidden_state = torch.cat((hidden_state, accept_hidden_state_new), dim=1)
-    tree_logits = model.ea_layer.topK_genrate(
+    tree_logits = model.modifier.topK_generate(
         accept_hidden_state_new,
         input_ids=torch.cat((input_ids, token.to(input_ids.device)), dim=1),
         head=model.base_model.lm_head,

@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from typing import Optional
 
 import shortuuid
@@ -17,8 +18,6 @@ from camel.utils.logits_precessor import prepare_logits_processor
 from accelerate.utils import set_seed
 
 set_seed(0)
-script_dir = os.path.dirname(__file__)
-parent_dir = os.path.dirname(script_dir)
 
 
 def load_questions(question_file: str, begin: Optional[int], end: Optional[int]):
@@ -32,13 +31,13 @@ def load_questions(question_file: str, begin: Optional[int], end: Optional[int])
     return questions
 
 
-def ea_forward(
+def camel_forward(
     input_ids, model, tokenizer, tree_choices, logits_processor=None, max_steps=512
 ):
     assert input_ids.shape[0] == 1, "Only support batch size 1 for now!!"
     # Avoid modifying the input_ids in-place
     input_ids = input_ids.clone()
-    model.ea_layer.reset_kv()
+    model.modifier.reset_kv()
 
     max_len = max([len(i) for i in tree_choices])
     alpha_num = [0 for _ in range(max_len)]
@@ -47,7 +46,7 @@ def ea_forward(
     if hasattr(model, "tree_choices") and model.tree_choices == tree_choices:
         tree_buffers = model.tree_buffers
     else:
-        tree_buffers = generate_tree_buffers(
+        tree_buffers = generate_tree_buffers_base(
             tree_choices,
             device=model.base_model.model.layers[-1].self_attn.q_proj.weight.device,
         )
@@ -141,6 +140,7 @@ def ea_forward(
 def run_eval(
     base_model_path,
     camel_model_path,
+    config_path,
     model_id,
     question_file,
     question_begin,
@@ -174,6 +174,7 @@ def run_eval(
             get_answers_func(
                 base_model_path,
                 camel_model_path,
+                config_path,
                 model_id,
                 questions[i : i + chunk_size],
                 answer_file,
@@ -194,6 +195,7 @@ def run_eval(
 def get_model_answers(
     base_model_path,
     camel_model_path,
+    config_path,
     model_id,
     questions,
     answer_file,
@@ -207,7 +209,8 @@ def get_model_answers(
 
     model = CamelModel.from_pretrained(
         base_model_path=base_model_path,
-        ea_model_path=camel_model_path,
+        modifier_path=camel_model_path,
+        config_path=config_path,
         torch_dtype=torch.float16,
         low_cpu_mem_usage=True,
         # load_in_8bit=True,
@@ -250,7 +253,7 @@ def get_model_answers(
             torch.cuda.synchronize()
             start_time = time.time()
 
-            output_ids, new_token, idx, alpha, alpha_num = ea_forward(
+            output_ids, new_token, idx, alpha, alpha_num = camel_forward(
                 torch.as_tensor(input_ids).cuda(),
                 model,
                 tokenizer,
@@ -314,7 +317,7 @@ def get_model_answers(
 
                 torch.cuda.synchronize()
                 start_time = time.time()
-                output_ids, new_token, idx, alpha, alpha_num = ea_forward(
+                output_ids, new_token, idx, alpha, alpha_num = camel_forward(
                     torch.as_tensor(input_ids).cuda(),
                     model,
                     tokenizer,
@@ -408,6 +411,7 @@ if __name__ == "__main__":
         type=str,
         default="meta-llama/Llama-2-7b-chat-hf",
     )
+    parser.add_argument("--camel-config-path", type=str, default=None)
     parser.add_argument(
         "--load-in-8bit", action="store_false", help="Use 8-bit quantization"
     )
@@ -417,6 +421,7 @@ if __name__ == "__main__":
         default="tmp",
         help="The name of the camel model. It is used in result file name.",
     )
+    parser.add_argument("--question-file", type=str, default=None)
     parser.add_argument(
         "--bench-name",
         type=str,
@@ -473,24 +478,29 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    args.model_id = args.model_id + "-temperature-" + str(args.temperature)
+    args.model_id = args.model_id + "-t" + str(args.temperature)
     args.tree_choices = eval(args.tree_choices)
     if args.num_gpus_total // args.num_gpus_per_model > 1:
         import ray
 
         ray.init()
 
-    question_file = f"{parent_dir}/data/{args.bench_name}/question.jsonl"
+    if args.question_file:
+        question_file = args.question_file
+    else:
+        question_file = f"data/{args.bench_name}/question.jsonl"
     if args.answer_file:
         answer_file = args.answer_file
     else:
-        answer_file = f"{args.bench_name}/{args.model_id}.jsonl"
+        time_str = datetime.now().strftime("%d-%H-%M-%S")
+        answer_file = f"data/{args.bench_name}/{args.model_id}-{time_str}.jsonl"
 
     print(f"Output to {answer_file}")
 
     run_eval(
         args.base_model_path,
         args.camel_model_path,
+        args.camel_config_path,
         args.model_id,
         question_file,
         args.question_begin,

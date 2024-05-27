@@ -28,7 +28,7 @@ from transformers.utils import (
 )
 
 from camel.utils.choices import mc_sim_7b_63
-from camel.utils.tree import generate_tree_buffers
+from camel.utils.tree import generate_tree_buffers_camel
 
 top_k = 10
 
@@ -107,12 +107,19 @@ def _speculation_make_causal_mask(
     past_seen_compress_token: int = 0,
     window_size: int = 4,
     key_value_length: int = 0,
+    speculation_length: int = 0,
 ):
     bsz, tgt_len = input_ids_shape
     mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
     mask_cond = torch.arange(mask.size(-1), device=device)
     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
     mask = mask.to(dtype)
+    if speculation_length > 0:
+        speculaiton_mask = torch.zeros(
+            (tgt_len, speculation_length), dtype=dtype, device=device
+        )
+        mask = torch.cat([speculaiton_mask, mask], dim=-1)
+    key_value_length += past_seen_compress_token
     if key_value_length > 0:
         kv_mask = torch.full(
             (tgt_len, key_value_length), torch.finfo(dtype).min, device=device
@@ -557,6 +564,7 @@ class LlamaCrossAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        speculation_hidden_states: Optional[torch.Tensor] = None,
         key_value_states: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -575,37 +583,37 @@ class LlamaCrossAttention(nn.Module):
                 key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
                 value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-                key_states = [
+                key_states_c = [
                     F.linear(key_value_states, key_slices[i])
                     for i in range(self.config.pretraining_tp)
                 ]
-                key_states = torch.cat(key_states, dim=-1)
+                key_states_c = torch.cat(key_states_c, dim=-1)
 
-                value_states = [
+                value_states_c = [
                     F.linear(key_value_states, value_slices[i])
                     for i in range(self.config.pretraining_tp)
                 ]
-                value_states = torch.cat(value_states, dim=-1)
+                value_states_c = torch.cat(value_states_c, dim=-1)
 
             else:
-                key_states = self.k_proj(key_value_states)
-                value_states = self.v_proj(key_value_states)
+                key_states_c = self.k_proj(key_value_states)
+                value_states_c = self.v_proj(key_value_states)
 
-            key_states = key_states.view(
+            key_states_c = key_states_c.view(
                 bsz, -1, self.num_key_value_heads, self.head_dim
             ).transpose(1, 2)
-            value_states = value_states.view(
+            value_states_c = value_states_c.view(
                 bsz, -1, self.num_key_value_heads, self.head_dim
             ).transpose(1, 2)
 
             if past_key_value is not None:
-                key_states = torch.cat([past_key_value[0], key_states], dim=2)
-                value_states = torch.cat([past_key_value[1], value_states], dim=2)
-            past_key_value = (key_states, value_states) if use_cache else None
-            # TODO: optimize
-            key_value_states = torch.concat([key_value_states, hidden_states], dim=1)
-        else:
-            key_value_states = hidden_states
+                key_states_c = torch.cat([past_key_value[0], key_states_c], dim=2)
+                value_states_c = torch.cat([past_key_value[1], value_states_c], dim=2)
+            past_key_value = (key_states_c, value_states_c)
+
+        key_value_states = torch.concat(
+            [speculation_hidden_states, hidden_states], dim=1
+        )
 
         # self attention
         if self.config.pretraining_tp > 1:
@@ -651,9 +659,11 @@ class LlamaCrossAttention(nn.Module):
             bsz, -1, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+
+        kv_seq_len = key_states.shape[-2]
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -866,6 +876,7 @@ class LlamaSpeculationLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        speculation_hidden_states: torch.Tensor,
         key_value_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -898,6 +909,7 @@ class LlamaSpeculationLayer(nn.Module):
         hidden_states, self_attn_weights, present_key_value = self.cross_attn(
             hidden_states=hidden_states,
             key_value_states=key_value_states,
+            speculation_hidden_states=speculation_hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
@@ -976,7 +988,7 @@ class LlamaModifier(nn.Module):
 
     def init_tree(self):
         self.tree = mc_sim_7b_63
-        self.tree_buffer = generate_tree_buffers(
+        self.tree_buffer = generate_tree_buffers_camel(
             self.tree, self.embed_tokens.weight.device
         )
 
@@ -1063,6 +1075,7 @@ class LlamaModifier(nn.Module):
         inputs_embeds,
         past_seen_compress_token,
         key_value_length,
+        speculation_length,
     ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
@@ -1077,6 +1090,7 @@ class LlamaModifier(nn.Module):
                 past_seen_compress_token=past_seen_compress_token,
                 window_size=self.window_size,
                 key_value_length=key_value_length,
+                speculation_length=speculation_length,
             )
 
         if attention_mask is not None:
@@ -1084,7 +1098,12 @@ class LlamaModifier(nn.Module):
             attention_mask = torch.concat(
                 [
                     torch.ones(
-                        (attention_mask.shape[0], key_value_length),
+                        (
+                            attention_mask.shape[0],
+                            key_value_length
+                            + past_seen_compress_token
+                            + speculation_length,
+                        ),
                         device=attention_mask.device,
                     ),
                     attention_mask,
@@ -1102,12 +1121,12 @@ class LlamaModifier(nn.Module):
 
         # [MODIFIED] add tree mask
         # TODO: check whether needs to use tree mask
-        # if hasattr(self, "tree_mask") and self.tree_mask is not None:
-        #     tree_mask = self.tree_mask
-        #     tree_len = tree_mask.size(-1)
-        #     combined_attention_mask[:, :, -tree_len:, -tree_len:][tree_mask == 0] = (
-        #         torch.finfo(torch.float32).min
-        #     )
+        if hasattr(self, "tree_mask") and self.tree_mask is not None:
+            tree_mask = self.tree_mask
+            tree_len = tree_mask.size(-1)
+            combined_attention_mask[:, :, -tree_len:, -tree_len:][tree_mask == 0] = (
+                torch.finfo(torch.float32).min
+            )
 
         return combined_attention_mask
 
@@ -1123,12 +1142,16 @@ class LlamaModifier(nn.Module):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         std=None,
+        compression_past_key_values: Optional[
+            List[torch.FloatTensor]
+        ] = None,  # for speculation layer
         speculation_past_key_values: Optional[
             List[torch.FloatTensor]
         ] = None,  # for speculation layer
         speculation_hidden_states: Optional[torch.FloatTensor] = None,
+        is_tree_decode: bool = False,
     ):
-        batch_size, seq_len, hidden_size = hidden_states.shape
+        batch_size, seq_len, _ = hidden_states.shape
         dtype, device = hidden_states.dtype, hidden_states.device
 
         with torch.no_grad():
@@ -1139,165 +1162,280 @@ class LlamaModifier(nn.Module):
         # down sample
         input_hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
 
-        all_hidden_states = () if output_hidden_states else None
-        next_decoder_cache = () if use_cache else None
-        compression_next_decoder_cache = () if use_cache else None
-
-        if speculation_past_key_values is None:
-            # Prefill
-            speculation_len = input_hidden_states.shape[1] % self.window_size
-            compression_len = input_hidden_states.shape[1] - speculation_len
-            compression_hidden_states = input_hidden_states[:, :compression_len, :]
-            speculation_hidden_states = input_hidden_states[:, compression_len:, :]
-        else:
-            # Decode
-            all_len = speculation_hidden_states.shape[1] + hidden_states.shape[1]
-            if all_len % self.window_size != 0 and all_len > self.window_size:
-                # overflow the window
-                speculation_len = all_len % self.window_size
-                compression_len = all_len - speculation_len
-                all_hidden_states = torch.concat(
-                    [speculation_hidden_states, hidden_states], dim=1
-                )
-                compression_hidden_states = all_hidden_states[:, :compression_len, :]
-                speculation_hidden_states = all_hidden_states[:, compression_len:, :]
-                input_hidden_states = speculation_hidden_states
-                seq_len = input_hidden_states.shape[1]
-            else:
-                speculation_hidden_states = torch.concat(
-                    [speculation_hidden_states, hidden_states], dim=1
-                )
-                compression_hidden_states = torch.empty(
-                    (batch_size, 0, hidden_size), dtype=dtype, device=device
-                )
-                input_hidden_states = speculation_hidden_states
-                seq_len = input_hidden_states.shape[1]
-            speculation_len = speculation_hidden_states.shape[1]
-            compression_len = compression_hidden_states.shape[1]
-
-        compression_attention_mask = attention_mask[:, :compression_len]
-        window_hidden_states = speculation_hidden_states
-
         past_seen_compress_tokens = (
             speculation_past_key_values[0][0].shape[2]
             if speculation_past_key_values is not None
             else 0
         )
-        # compression
-        # TODO: less calculation
-        if compression_len != 0 and compression_len % self.window_size == 0:
-            compression_position_ids = torch.arange(
-                past_seen_compress_tokens * self.window_size,
-                past_seen_compress_tokens * self.window_size + compression_len,
-                dtype=torch.long,
-                device=device,
-            )[None, :].expand(hidden_states.shape[0], -1)
+        win_len = (
+            speculation_hidden_states.shape[1]
+            if speculation_hidden_states is not None
+            else 0
+        )
 
-            compression_attention_mask = (
-                self._prepare_compression_decoder_attention_mask(
-                    compression_attention_mask,
-                    (batch_size, compression_len),
-                    compression_hidden_states,
-                    past_seen_compress_tokens * self.window_size,
-                )
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                (
+                    batch_size,
+                    input_hidden_states.shape[1]
+                    + win_len
+                    + past_seen_compress_tokens * self.window_size,
+                ),
+                dtype=torch.bool,
+                device=inputs_embeds.device,
             )
 
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+        all_hidden_states = () if output_hidden_states else None
+        next_decoder_cache = () if use_cache else None
+        next_decoder_cache_compresssion = () if use_cache else None
+
+        if is_tree_decode:
+            # speculation
+            speculation_attention_mask = attention_mask[:, -seq_len:]
+            speculation_position_ids = torch.arange(
+                past_seen_compress_tokens * self.window_size + win_len,
+                past_seen_compress_tokens * self.window_size + win_len + seq_len,
+                device=device,
+                dtype=torch.long,
+            )
+            speculation_position_ids = speculation_position_ids[None, :].expand(
+                batch_size, -1
+            )
+            window_hidden_states = (
+                speculation_hidden_states
+                if speculation_hidden_states is not None
+                else torch.empty(
+                    (batch_size, 0, input_hidden_states.shape[2]),
+                    dtype=dtype,
+                    device=device,
+                )
+            )
+            speculation_attention_mask = self._prepare_speculation_cross_attention_mask(
+                speculation_attention_mask,
+                (batch_size, seq_len),
+                input_hidden_states,
+                past_seen_compress_tokens,
+                key_value_length=0,
+                speculation_length=win_len,
+            )
+            speculation_past_key_value = (
+                speculation_past_key_values[0]
+                if speculation_past_key_values is not None
+                else None
+            )
+            if self.gradient_checkpointing and self.training:
+
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        # None for past_key_value
+                        return module(
+                            *inputs, speculation_past_key_value, output_attentions
+                        )
+
+                    return custom_forward
+
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(self.speculation_layer),
+                    input_hidden_states,
+                    window_hidden_states,
+                    None,
+                    speculation_attention_mask,
+                    speculation_position_ids,
+                    use_reentrant=False,
+                )
+            else:
+                layer_outputs = self.speculation_layer(
+                    input_hidden_states,
+                    window_hidden_states,
+                    None,
+                    attention_mask=speculation_attention_mask,
+                    position_ids=speculation_position_ids,
+                    past_key_value=speculation_past_key_value,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                )
+            hidden_states = layer_outputs[0]
+            if use_cache:
+                next_decoder_cache += (
+                    layer_outputs[2 if output_attentions else 1],
+                )  # past_key_values
+            speculation_hidden_states = torch.cat(
+                [speculation_hidden_states, input_hidden_states], dim=1
+            )
+        else:
+            speculation_key_value_states = None
+
+            if speculation_past_key_values is None:
+                # Prefill
+                speculation_len = input_hidden_states.shape[1] % self.window_size
+                compression_len = input_hidden_states.shape[1] - speculation_len
+                compression_hidden_states = input_hidden_states[:, :compression_len, :]
+                speculation_hidden_states = input_hidden_states[:, compression_len:, :]
+                window_hidden_states = torch.empty(
+                    (batch_size, 0, input_hidden_states.shape[2]),
+                    dtype=dtype,
+                    device=device,
+                )
+            else:
+                # Decode
+                if win_len != 0 and win_len % self.window_size == 0:
+                    # overflow the window
+                    compression_hidden_states = speculation_hidden_states
+                    speculation_hidden_states = input_hidden_states
+                    window_hidden_states = torch.empty(
+                        (batch_size, 0, input_hidden_states.shape[2]), dtype=dtype, device=device
+                    )
+                else:
+                    window_hidden_states = speculation_hidden_states
+                    speculation_hidden_states = torch.concat(
+                        [speculation_hidden_states, input_hidden_states], dim=1
+                    )
+                    compression_hidden_states = torch.empty(
+                        (batch_size, 0, input_hidden_states.shape[2]), dtype=dtype, device=device
+                    )
+                compression_len = compression_hidden_states.shape[1]
+
+            # compression
+            if compression_len != 0 and compression_len % self.window_size == 0:
+                # need to compress
+                compression_attention_mask = attention_mask[
+                    :, : compression_len + past_seen_compress_tokens * self.window_size
+                ]
+                compression_position_ids = torch.arange(
+                    past_seen_compress_tokens * self.window_size,
+                    past_seen_compress_tokens * self.window_size + compression_len,
+                    dtype=torch.long,
+                    device=device,
+                )[None, :].expand(hidden_states.shape[0], -1)
+
+                compression_attention_mask = (
+                    self._prepare_compression_decoder_attention_mask(
+                        compression_attention_mask,
+                        (batch_size, compression_len),
+                        compression_hidden_states,
+                        past_seen_compress_tokens * self.window_size,
+                    )
+                )
+
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                compression_past_key_value = (
+                    compression_past_key_values[0]
+                    if compression_past_key_values is not None
+                    else None
+                )
+
+                if self.gradient_checkpointing and self.training:
+
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            # None for past_key_value
+                            return module(
+                                *inputs, compression_past_key_value, output_attentions
+                            )
+
+                        return custom_forward
+
+                    layer_outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(self.compression_layer),
+                        compression_hidden_states,
+                        compression_attention_mask,
+                        compression_position_ids,
+                        use_reentrant=False,
+                    )
+                else:
+                    layer_outputs = self.compression_layer(
+                        compression_hidden_states,
+                        attention_mask=compression_attention_mask,
+                        position_ids=compression_position_ids,
+                        past_key_value=compression_past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                    )
+
+                hidden_states = layer_outputs[0]
+                if use_cache:
+                    next_decoder_cache_compresssion += (
+                        layer_outputs[2 if output_attentions else 1],
+                    )  # past_key_values
+
+                speculation_key_value_states = hidden_states[
+                    :, (self.window_size - 1) :: self.window_size, :
+                ]
+            else:
+                next_decoder_cache_compresssion = compression_past_key_values
+
+            # speculation
+            speculation_attention_mask = attention_mask[:, -seq_len:]
+            speculation_position_ids = torch.arange(
+                past_seen_compress_tokens * self.window_size,
+                past_seen_compress_tokens * self.window_size + seq_len,
+                device=device,
+                dtype=torch.long,
+            )
+
+            speculation_position_ids = speculation_position_ids[None, :].expand(
+                batch_size, -1
+            )
+
+            speculation_attention_mask = self._prepare_speculation_cross_attention_mask(
+                speculation_attention_mask,
+                (batch_size, seq_len),
+                input_hidden_states,
+                past_seen_compress_tokens,
+                key_value_length=(
+                    speculation_key_value_states.shape[1]
+                    if speculation_key_value_states is not None
+                    else 0
+                ),
+                speculation_length=window_hidden_states.shape[1],
+            )
+
+            speculation_past_key_value = (
+                speculation_past_key_values[0]
+                if speculation_past_key_values is not None
+                else None
+            )
 
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value
-                        return module(*inputs, None, output_attentions)
+                        return module(
+                            *inputs, speculation_past_key_value, output_attentions
+                        )
 
                     return custom_forward
 
                 layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(self.compression_layer),
-                    compression_hidden_states,
-                    compression_attention_mask,
-                    compression_position_ids,
+                    create_custom_forward(self.speculation_layer),
+                    input_hidden_states,
+                    window_hidden_states,
+                    speculation_key_value_states,
+                    speculation_attention_mask,
+                    speculation_position_ids,
                     use_reentrant=False,
                 )
             else:
-                layer_outputs = self.compression_layer(
-                    compression_hidden_states,
-                    attention_mask=compression_attention_mask,
-                    position_ids=compression_position_ids,
-                    past_key_value=None,
+                layer_outputs = self.speculation_layer(
+                    input_hidden_states,
+                    window_hidden_states,
+                    speculation_key_value_states,
+                    attention_mask=speculation_attention_mask,
+                    position_ids=speculation_position_ids,
+                    past_key_value=speculation_past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                 )
 
             hidden_states = layer_outputs[0]
-            speculation_key_value_states = hidden_states[
-                :, (self.window_size - 1) :: self.window_size, :
-            ]
 
-        # speculation
-        speculation_position_ids = torch.arange(
-            past_seen_compress_tokens * self.window_size,
-            past_seen_compress_tokens * self.window_size + seq_len,
-            device=device,
-            dtype=torch.long,
-        )
-
-        speculation_position_ids = speculation_position_ids[None, :].expand(
-            batch_size, -1
-        )
-
-        speculation_attention_mask = self._prepare_speculation_cross_attention_mask(
-            attention_mask,
-            (batch_size, seq_len),
-            input_hidden_states,
-            past_seen_compress_tokens,
-            key_value_length=speculation_key_value_states.shape[1],
-        )
-
-        speculation_past_key_value = (
-            speculation_past_key_values[0]
-            if speculation_past_key_values is not None
-            else None
-        )
-
-        if self.gradient_checkpointing and self.training:
-
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    # None for past_key_value
-                    return module(
-                        *inputs, speculation_past_key_value, output_attentions
-                    )
-
-                return custom_forward
-
-            layer_outputs = torch.utils.checkpoint.checkpoint(
-                create_custom_forward(self.speculation_layer),
-                input_hidden_states,
-                speculation_key_value_states,
-                speculation_attention_mask,
-                speculation_position_ids,
-                use_reentrant=False,
-            )
-        else:
-            layer_outputs = self.speculation_layer(
-                input_hidden_states,
-                speculation_key_value_states,
-                attention_mask=speculation_attention_mask,
-                position_ids=speculation_position_ids,
-                past_key_value=speculation_past_key_value,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
-
-        hidden_states = layer_outputs[0]
-
-        if use_cache:
-            next_decoder_cache += (
-                layer_outputs[2 if output_attentions else 1],
-            )  # past_key_values
+            if use_cache:
+                next_decoder_cache += (
+                    layer_outputs[2 if output_attentions else 1],
+                )  # past_key_values
 
         # upper sample
         hidden_states = self.fc2(hidden_states)
@@ -1305,54 +1443,54 @@ class LlamaModifier(nn.Module):
             return (
                 hidden_states,
                 next_decoder_cache,
-                compression_next_decoder_cache,
-                window_hidden_states,
+                next_decoder_cache_compresssion,
+                speculation_hidden_states,
             )
 
         return hidden_states
 
-    @torch.no_grad()
-    def generate(self, hidden_states, input_ids, head, max_length=4, use_cache=False):
-        return_input_ids = copy.deepcopy(input_ids[0].tolist())
-        input_ids = input_ids[:, 1:]
+    # @torch.no_grad()
+    # def generate(self, hidden_states, input_ids, head, max_length=4, use_cache=False):
+    #     return_input_ids = copy.deepcopy(input_ids[0].tolist())
+    #     input_ids = input_ids[:, 1:]
 
-        if use_cache:
-            past_key_values = None
-            compression_past_key_values = None
-            for i in range(max_length):
-                if past_key_values != None:
-                    out_hidden, past_key_values, compression_past_key_values = self(
-                        out_hidden[:, -1:],
-                        input_ids=torch.tensor([[token]]).to(input_ids.device),
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                        compression_past_key_values=compression_past_key_values,
-                    )
-                else:
-                    out_hidden, past_key_values, compression_past_key_values = self(
-                        hidden_states, input_ids=input_ids, use_cache=True
-                    )
-                last_hidden = out_hidden[:, -1]
-                last_headout = head(last_hidden)
-                token = torch.argmax(last_headout)
-                return_input_ids.append(token.item())
-                if token == 2:
-                    break
-        else:
-            for i in range(max_length):
-                out_hidden = self(hidden_states, input_ids=input_ids)
-                last_hidden = out_hidden[:, -1]
-                last_headout = head(last_hidden)
-                token = torch.argmax(last_headout)
-                return_input_ids.append(token.item())
-                input_ids = torch.cat(
-                    (input_ids, torch.tensor([[token]]).to(input_ids.device)), dim=1
-                )
-                if token == 2:
-                    break
-                hidden_states = torch.cat((hidden_states, out_hidden[:, -1:]), dim=1)
+    #     if use_cache:
+    #         past_key_values = None
+    #         compression_past_key_values = None
+    #         for i in range(max_length):
+    #             if past_key_values != None:
+    #                 out_hidden, past_key_values, compression_past_key_values = self(
+    #                     out_hidden[:, -1:],
+    #                     input_ids=torch.tensor([[token]]).to(input_ids.device),
+    #                     past_key_values=past_key_values,
+    #                     use_cache=True,
+    #                     compression_past_key_values=compression_past_key_values,
+    #                 )
+    #             else:
+    #                 out_hidden, past_key_values, compression_past_key_values = self(
+    #                     hidden_states, input_ids=input_ids, use_cache=True
+    #                 )
+    #             last_hidden = out_hidden[:, -1]
+    #             last_headout = head(last_hidden)
+    #             token = torch.argmax(last_headout)
+    #             return_input_ids.append(token.item())
+    #             if token == 2:
+    #                 break
+    #     else:
+    #         for i in range(max_length):
+    #             out_hidden = self(hidden_states, input_ids=input_ids)
+    #             last_hidden = out_hidden[:, -1]
+    #             last_headout = head(last_hidden)
+    #             token = torch.argmax(last_headout)
+    #             return_input_ids.append(token.item())
+    #             input_ids = torch.cat(
+    #                 (input_ids, torch.tensor([[token]]).to(input_ids.device)), dim=1
+    #             )
+    #             if token == 2:
+    #                 break
+    #             hidden_states = torch.cat((hidden_states, out_hidden[:, -1:]), dim=1)
 
-        return return_input_ids
+    #     return return_input_ids
 
     @torch.no_grad()
     def repeat_kv(self, kv, numr):
@@ -1371,6 +1509,7 @@ class LlamaModifier(nn.Module):
     def reset_kv(self):
         self.stable_kv = None
         self.compression_stable_kv = None
+        self.window_hidden_states = None
 
     @torch.no_grad()
     def repeat_hidden(self, hidden_state, repeat_num):
@@ -1402,7 +1541,7 @@ class LlamaModifier(nn.Module):
         return sampled_indices, sampled_probs, probabilities
 
     @torch.no_grad()
-    def topK_genrate(
+    def topK_generate(
         self,
         hidden_states,
         input_ids,
@@ -1420,19 +1559,30 @@ class LlamaModifier(nn.Module):
 
             if hasattr(self, "stable_kv") and self.stable_kv is not None:
                 kv_len = self.stable_kv[0][0].shape[2]
-                out_hidden, past_key_values, compression_past_key_values = self(
+                win_len = self.window_hidden_states.shape[1]
+                (
+                    out_hidden,
+                    speculation_past_key_values,
+                    compression_past_key_values,
+                    speculation_hidden_states,
+                ) = self(
                     hidden_states,
-                    input_ids=input_ids[:, kv_len:],
-                    past_key_values=self.stable_kv,
+                    input_ids=input_ids[:, kv_len * self.window_size + win_len :],
                     use_cache=True,
+                    speculation_past_key_values=self.stable_kv,
                     compression_past_key_values=self.compression_stable_kv,
+                    speculation_hidden_states=self.window_hidden_states,
                 )
             else:
-                out_hidden, past_key_values, compression_past_key_values = self(
-                    hidden_states, input_ids=input_ids, use_cache=True
-                )
-            self.stable_kv = past_key_values
+                (
+                    out_hidden,
+                    speculation_past_key_values,
+                    compression_past_key_values,
+                    speculation_hidden_states,
+                ) = self(hidden_states, input_ids=input_ids, use_cache=True)
+            self.stable_kv = speculation_past_key_values
             self.compression_stable_kv = compression_past_key_values
+            self.window_hidden_states = speculation_hidden_states
             last_hidden = out_hidden[:, -1]
             if not self.diff_device:
                 last_headout = head(last_hidden)
@@ -1473,13 +1623,20 @@ class LlamaModifier(nn.Module):
                 # hidden_states = hidden_states.repeat(1,len_sq,1)
                 self.tree_mask = self.tree_buffer["attn_mask"][i]
                 position_ids = len_posi + self.tree_buffer["position_ids"][i]
-                out_hidden, past_key_values, compression_past_key_values = self(
+                (
+                    out_hidden,
+                    speculation_past_key_values,
+                    compression_past_key_values,
+                    speculation_hidden_states,
+                ) = self(
                     hidden_states,
                     input_ids=input_ids,
-                    past_key_values=past_key_values,
                     position_ids=position_ids,
                     use_cache=True,
+                    speculation_past_key_values=speculation_past_key_values,
+                    speculation_hidden_states=speculation_hidden_states,
                     compression_past_key_values=compression_past_key_values,
+                    is_tree_decode=True,
                 )
                 len_posi += 1
 

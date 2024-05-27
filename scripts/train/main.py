@@ -265,6 +265,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoint/")
     parser.add_argument("--data-path", type=str, default="data/")
+    parser.add_argument("--data-num", type=int, default=-1)
     parser.add_argument(
         "--camel-config-path",
         type=str,
@@ -324,7 +325,7 @@ if __name__ == "__main__":
     else:
         aug = None
 
-    datapath = list_files(args.data_path)
+    datapath = list_files(args.data_path)[: args.data_num]
     traindatapath = datapath[: int(len(datapath) * 0.95)]
     testdatapath = datapath[int(len(datapath) * 0.95) :]
     traindataset = CustomDataset(traindatapath, transform=aug)
@@ -552,5 +553,6 @@ if __name__ == "__main__":
                         {"test/epochacc": correct / total, "test/epochloss": epoch_loss}
                     )
                 accelerator.save_state(
-                    output_dir=f"{args.checkpoint_dir}/state_{epoch}"
+                    output_dir=f"{args.checkpoint_dir}/state_{epoch}",
+                    safe_serialization=False,
                 )

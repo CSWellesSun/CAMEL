@@ -70,9 +70,10 @@ class CamelModel(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        type="LLaMA",
+        type="LlamaForCausalLM",
         base_model_path=None,
         modifier_path=None,
+        config_path=None,
         **kwargs,
     ):
         type = AutoConfig.from_pretrained(base_model_path).architectures[0]
@@ -81,10 +82,11 @@ class CamelModel(nn.Module):
         else:
             raise ValueError(f"Only support base model of Llama architecture")
 
-        configpath = os.path.join(modifier_path, "config.json")
-        if not os.path.exists(configpath):
-            configpath = hf_hub_download(modifier_path, "config.json")
-        model = cls(base_model, base_model_path, configpath)
+        if config_path is None:
+            config_path = os.path.join(modifier_path, "config.json")
+            if not os.path.exists(config_path):
+                config_path = hf_hub_download(modifier_path, "config.json")
+        model = cls(base_model, base_model_path, config_path)
         load_model_path = os.path.join(modifier_path, "pytorch_model.bin")
         if not os.path.exists(load_model_path):
             load_model_path = hf_hub_download(modifier_path, "pytorch_model.bin")
@@ -130,12 +132,12 @@ class CamelModel(nn.Module):
             input_ids = torch.cat((input_ids, token.to(input_ids.device)), dim=1)
             # Clone the output hidden states
 
-            ea_logits = self.modifier.topK_genrate(
+            camel_logits = self.modifier.topK_generate(
                 hidden_states, input_ids, self.base_model.lm_head, logits_processor
             )
             if output_orig:
-                return ea_logits, outputs, orig, hidden_states, token
-            return ea_logits, hidden_states, token
+                return camel_logits, outputs, orig, hidden_states, token
+            return camel_logits, hidden_states, token
         else:
             if output_orig:
                 return outputs, orig, hidden_states
@@ -165,7 +167,7 @@ class CamelModel(nn.Module):
         if hasattr(self, "tree_choices") and self.tree_choices == tree_choices:
             tree_buffers = self.tree_buffers
         else:
-            tree_buffers = generate_tree_buffers(
+            tree_buffers = generate_tree_buffers_base(
                 tree_choices,
                 device=self.base_model.model.layers[-1].self_attn.q_proj.weight.device,
             )
