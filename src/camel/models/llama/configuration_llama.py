@@ -1,4 +1,5 @@
 # Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/model/configs.py
+# Modifications: rename the class
 from transformers.configuration_utils import PretrainedConfig
 
 

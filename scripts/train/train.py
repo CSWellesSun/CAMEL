@@ -1,4 +1,5 @@
 # Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/train/main.py
+# Modifications: wrap train_config as a dataclass and remove some useless config parameters
 import argparse
 import os
 import json

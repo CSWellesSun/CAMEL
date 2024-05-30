@@ -1,4 +1,5 @@
 # Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/model/ea_model.py
+# Modifications: rename the entire class
 import copy
 import json
 import time

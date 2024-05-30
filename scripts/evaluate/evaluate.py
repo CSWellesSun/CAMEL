@@ -1,4 +1,5 @@
 # Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/evaluation/gen_ea_alpha_llama2chat.py
+# Modifications: support question_file and add timestamps to answer_file
 import argparse
 import json
 import os

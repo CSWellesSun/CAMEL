@@ -1,3 +1,5 @@
+# Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/evaluation/speed.py
+# Modifications: support command line arguments
 import json
 from transformers import AutoTokenizer
 import numpy as np

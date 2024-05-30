@@ -1,4 +1,5 @@
 # Source: https://github.com/SafeAILab/EAGLE/blob/main/eagle/model/cnets.py
+# Modifications: update the entire LlamaModifier
 """ PyTorch LLaMA model."""
 
 import copy
@@ -31,37 +32,6 @@ from camel.utils.choices import mc_sim_7b_63
 from camel.utils.tree import generate_tree_buffers_camel
 
 top_k = 10
-
-
-# Copied from transformers.models.bart.modeling_bart._make_causal_mask
-# def _make_causal_mask(
-#     input_ids_shape: torch.Size,
-#     dtype: torch.dtype,
-#     device: torch.device,
-#     past_key_values_length: int = 0,
-# ):
-#     """
-#     Make causal mask used for bi-directional self-attention.
-#     """
-#     bsz, tgt_len = input_ids_shape
-#     mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
-#     mask_cond = torch.arange(mask.size(-1), device=device)
-#     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
-#     mask = mask.to(dtype)
-
-#     if past_key_values_length > 0:
-#         mask = torch.cat(
-#             [
-#                 torch.zeros(
-#                     tgt_len, past_key_values_length, dtype=dtype, device=device
-#                 ),
-#                 mask,
-#             ],
-#             dim=-1,
-#         )
-#     return mask[None, None, :, :].expand(
-#         bsz, 1, tgt_len, tgt_len + past_key_values_length
-#     )
 
 
 def _compression_make_causal_mask(
@@ -1001,42 +971,6 @@ class LlamaModifier(nn.Module):
     def reset(self):
         self.tree_mask = None
 
-    # def _prepare_decoder_attention_mask(
-    #     self, attention_mask, input_shape, inputs_embeds, past_key_values_length
-    # ):
-    #     # create causal mask
-    #     # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-    #     combined_attention_mask = None
-    #     if input_shape[-1] > 1:
-    #         combined_attention_mask = _make_causal_mask(
-    #             input_shape,
-    #             # inputs_embeds.dtype,
-    #             torch.float32,  # [MODIFIED] force to cast to float32
-    #             device=inputs_embeds.device,
-    #             past_key_values_length=past_key_values_length,
-    #         )
-
-    #     if attention_mask is not None:
-    #         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-    #         expanded_attn_mask = _expand_mask(
-    #             attention_mask, torch.float32, tgt_len=input_shape[-1]
-    #         ).to(inputs_embeds.device)
-    #         combined_attention_mask = (
-    #             expanded_attn_mask
-    #             if combined_attention_mask is None
-    #             else expanded_attn_mask + combined_attention_mask
-    #         )
-
-    #     # [MODIFIED] add tree mask
-    #     if hasattr(self, "tree_mask") and self.tree_mask is not None:
-    #         tree_mask = self.tree_mask
-    #         tree_len = tree_mask.size(-1)
-    #         combined_attention_mask[:, :, -tree_len:, -tree_len:][tree_mask == 0] = (
-    #             torch.finfo(torch.float32).min
-    #         )
-
-    #     return combined_attention_mask
-
     def _prepare_compression_decoder_attention_mask(
         self, attention_mask, input_shape, inputs_embeds, past_key_values_length
     ):
@@ -1454,49 +1388,6 @@ class LlamaModifier(nn.Module):
             )
 
         return hidden_states
-
-    # @torch.no_grad()
-    # def generate(self, hidden_states, input_ids, head, max_length=4, use_cache=False):
-    #     return_input_ids = copy.deepcopy(input_ids[0].tolist())
-    #     input_ids = input_ids[:, 1:]
-
-    #     if use_cache:
-    #         past_key_values = None
-    #         compression_past_key_values = None
-    #         for i in range(max_length):
-    #             if past_key_values != None:
-    #                 out_hidden, past_key_values, compression_past_key_values = self(
-    #                     out_hidden[:, -1:],
-    #                     input_ids=torch.tensor([[token]]).to(input_ids.device),
-    #                     past_key_values=past_key_values,
-    #                     use_cache=True,
-    #                     compression_past_key_values=compression_past_key_values,
-    #                 )
-    #             else:
-    #                 out_hidden, past_key_values, compression_past_key_values = self(
-    #                     hidden_states, input_ids=input_ids, use_cache=True
-    #                 )
-    #             last_hidden = out_hidden[:, -1]
-    #             last_headout = head(last_hidden)
-    #             token = torch.argmax(last_headout)
-    #             return_input_ids.append(token.item())
-    #             if token == 2:
-    #                 break
-    #     else:
-    #         for i in range(max_length):
-    #             out_hidden = self(hidden_states, input_ids=input_ids)
-    #             last_hidden = out_hidden[:, -1]
-    #             last_headout = head(last_hidden)
-    #             token = torch.argmax(last_headout)
-    #             return_input_ids.append(token.item())
-    #             input_ids = torch.cat(
-    #                 (input_ids, torch.tensor([[token]]).to(input_ids.device)), dim=1
-    #             )
-    #             if token == 2:
-    #                 break
-    #             hidden_states = torch.cat((hidden_states, out_hidden[:, -1:]), dim=1)
-
-    #     return return_input_ids
 
     @torch.no_grad()
     def repeat_kv(self, kv, numr):
