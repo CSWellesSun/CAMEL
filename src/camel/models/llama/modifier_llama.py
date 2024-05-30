@@ -114,6 +114,12 @@ def _speculation_make_causal_mask(
     mask_cond = torch.arange(mask.size(-1), device=device)
     mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
     mask = mask.to(dtype)
+    if past_seen_compress_token < key_value_length:
+        # prefill, TODO: need to optimize
+        block_mask = torch.arange(tgt_len, device=device).unsqueeze(0) // window_size
+        block_mask = block_mask != block_mask.T
+        casual_block_mask = torch.logical_or(mask, block_mask)
+        mask = torch.where(casual_block_mask, torch.finfo(dtype).min, 0)
     if speculation_length > 0:
         speculaiton_mask = torch.zeros(
             (tgt_len, speculation_length), dtype=dtype, device=device
@@ -1283,7 +1289,9 @@ class LlamaModifier(nn.Module):
                     compression_hidden_states = speculation_hidden_states
                     speculation_hidden_states = input_hidden_states
                     window_hidden_states = torch.empty(
-                        (batch_size, 0, input_hidden_states.shape[2]), dtype=dtype, device=device
+                        (batch_size, 0, input_hidden_states.shape[2]),
+                        dtype=dtype,
+                        device=device,
                     )
                 else:
                     window_hidden_states = speculation_hidden_states
@@ -1291,19 +1299,19 @@ class LlamaModifier(nn.Module):
                         [speculation_hidden_states, input_hidden_states], dim=1
                     )
                     compression_hidden_states = torch.empty(
-                        (batch_size, 0, input_hidden_states.shape[2]), dtype=dtype, device=device
+                        (batch_size, 0, input_hidden_states.shape[2]),
+                        dtype=dtype,
+                        device=device,
                     )
                 compression_len = compression_hidden_states.shape[1]
 
             # compression
             if compression_len != 0 and compression_len % self.window_size == 0:
                 # need to compress
-                compression_attention_mask = attention_mask[
-                    :, : compression_len + past_seen_compress_tokens * self.window_size
-                ]
+                compression_attention_mask = attention_mask[:, :compression_len]
                 compression_position_ids = torch.arange(
-                    past_seen_compress_tokens * self.window_size,
-                    past_seen_compress_tokens * self.window_size + compression_len,
+                    0,
+                    compression_len,
                     dtype=torch.long,
                     device=device,
                 )[None, :].expand(hidden_states.shape[0], -1)
@@ -1313,7 +1321,7 @@ class LlamaModifier(nn.Module):
                         compression_attention_mask,
                         (batch_size, compression_len),
                         compression_hidden_states,
-                        past_seen_compress_tokens * self.window_size,
+                        0,
                     )
                 )
 
@@ -1331,9 +1339,7 @@ class LlamaModifier(nn.Module):
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
                             # None for past_key_value
-                            return module(
-                                *inputs, compression_past_key_value, output_attentions
-                            )
+                            return module(*inputs, None, output_attentions)
 
                         return custom_forward
 
@@ -1349,7 +1355,7 @@ class LlamaModifier(nn.Module):
                         compression_hidden_states,
                         attention_mask=compression_attention_mask,
                         position_ids=compression_position_ids,
-                        past_key_value=compression_past_key_value,
+                        past_key_value=None,
                         output_attentions=output_attentions,
                         use_cache=use_cache,
                     )
