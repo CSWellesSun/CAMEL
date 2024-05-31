@@ -16,8 +16,8 @@ if __name__ == "__main__":
     parser.add_argument("--result-path", type=str, default=None)
     args = parser.parse_args()
     tokenizer = AutoTokenizer.from_pretrained(args.base_model_path)
-    jsonl_file = args.base_result_path
-    jsonl_file_base = args.result_path
+    jsonl_file = args.result_path
+    jsonl_file_base = args.base_result_path
     data = []
     with open(jsonl_file, "r", encoding="utf-8") as file:
         for line in file:

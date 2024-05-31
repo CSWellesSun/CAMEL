@@ -40,10 +40,6 @@ def camel_forward(
     input_ids = input_ids.clone()
     model.modifier.reset_kv()
 
-    max_len = max([len(i) for i in tree_choices])
-    alpha_num = [0 for _ in range(max_len)]
-    alpha = [0 for _ in range(max_len)]
-
     if hasattr(model, "tree_choices") and model.tree_choices == tree_choices:
         tree_buffers = model.tree_buffers
     else:
@@ -73,69 +69,30 @@ def camel_forward(
 
     input_len = input_ids.shape[1]
     reset_tree_mode(model)
-    tree_logits, logits, hidden_state, sample_token = initialize_tree(
-        input_ids,
-        model,
-        tree_buffers["tree_attn_mask"],
-        past_key_values,
-        logits_processor,
+    outputs = model.base_model(
+        input_ids, past_key_values=past_key_values, use_cache=True
     )
     new_token = 0
 
     for idx in range(max_steps):
-        candidates, cart_candidates_prob, tree_candidates = generate_candidates(
-            tree_logits,
-            tree_buffers["tree_indices"],
-            tree_buffers["retrieve_indices"],
-            sample_token,
-            logits_processor,
+        if logits_processor is not None:
+            logits = outputs.logits[:, -1]
+            logits = logits_processor(None, logits)
+            probabilities = torch.nn.functional.softmax(logits, dim=-1)
+            input_id = torch.multinomial(probabilities, 1)
+        else:
+            input_id = outputs.logits[:, -1:].argmax(dim=-1)
+        outputs = model.base_model(
+            input_id, use_cache=True, past_key_values=past_key_values
         )
-        logits, hidden_state_new, outputs = tree_decoding(
-            model,
-            tree_candidates,
-            past_key_values,
-            tree_buffers["tree_position_ids"],
-            input_ids,
-            tree_buffers["retrieve_indices"],
-        )
-        best_candidate, accept_length, sample_p = evaluate_posterior(
-            logits,
-            candidates,
-            logits_processor,
-            cart_candidates_prob,
-            alpha,
-            alpha_num,
-            tree_logits[2],
-            tree_buffers["p_indices"],
-            tree_candidates,
-            tree_buffers["b_indices"],
-        )
-        input_ids, tree_logits, new_token, hidden_state, sample_token = (
-            update_inference_inputs(
-                input_ids,
-                candidates,
-                best_candidate,
-                accept_length,
-                tree_buffers["retrieve_indices"],
-                logits_processor,
-                logits,
-                tree_logits,
-                new_token,
-                past_key_values_data,
-                current_length_data,
-                model,
-                hidden_state,
-                hidden_state_new,
-                sample_p,
-            )
-        )
+        input_ids = torch.cat([input_ids, input_id], dim=-1)
         if tokenizer.eos_token_id in input_ids[0, input_len:].tolist():
             break
         if new_token > 1024:
             break
         if input_ids.shape[1] > 1960:
             break
-    return input_ids, new_token, idx, alpha, alpha_num
+    return input_ids, new_token, idx
 
 
 def run_eval(
@@ -260,7 +217,7 @@ def get_model_answers(
             torch.cuda.synchronize()
             start_time = time.time()
 
-            output_ids, new_token, idx, alpha, alpha_num = camel_forward(
+            output_ids, new_token, idx = camel_forward(
                 torch.as_tensor(input_ids).cuda(),
                 model,
                 tokenizer,
@@ -324,7 +281,7 @@ def get_model_answers(
 
                 torch.cuda.synchronize()
                 start_time = time.time()
-                output_ids, new_token, idx, alpha, alpha_num = camel_forward(
+                output_ids, new_token, idx = camel_forward(
                     torch.as_tensor(input_ids).cuda(),
                     model,
                     tokenizer,
@@ -375,8 +332,6 @@ def get_model_answers(
                         "idxs": idxs,
                         "new_tokens": new_tokens,
                         "wall_time": wall_time,
-                        "alpha": alpha,
-                        "alpha_num": alpha_num,
                     }
                 )
 
@@ -429,7 +384,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-id",
         type=str,
-        default="tmp",
+        default="base",
         help="The name of the camel model. It is used in result file name.",
     )
     parser.add_argument("--question-file", type=str, default=None)
