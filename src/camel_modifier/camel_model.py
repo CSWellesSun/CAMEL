@@ -11,13 +11,13 @@ from transformers import PreTrainedModel, PretrainedConfig, AutoConfig
 from transformers import AutoTokenizer
 from huggingface_hub import hf_hub_download
 
-from camel.models.llama.modeling_llama import LlamaForCausalLM as KVLlamaForCausalLM
-from camel.utils.logits_precessor import *
-from camel.utils.tree import *
-from camel.utils.cache import initialize_past_key_values
-from camel.utils.choices import mc_sim_7b_63
-from camel.camel_modifier import CamelModifier
-from camel.models.llama.configuration_llama import CamelConfig
+from camel_modifier.models.llama.modeling_llama import LlamaForCausalLM as KVLlamaForCausalLM
+from camel_modifier.utils.logits_precessor import *
+from camel_modifier.utils.tree import *
+from camel_modifier.utils.cache import initialize_past_key_values
+from camel_modifier.utils.choices import mc_sim_7b_63
+from camel_modifier.camel_modifier import CamelModifier
+from camel_modifier.models.llama.configuration_llama import CamelConfig
 
 
 class CamelModel(nn.Module):

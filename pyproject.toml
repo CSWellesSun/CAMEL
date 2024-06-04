@@ -1,10 +1,12 @@
 [tool.poetry]
-name = "camel"
-version = "0.1.0"
+name = "camel_modifier"
+version = "0.0.1"
 description = "CAMEL: Context-Aware Modifier for Efficient Language model"
 authors = ["Welles Sun <welles.sun@zju.edu.cn>"]
 readme = "README.md"
-packages = [{include = "camel", from = "src"}]
+packages = [{include = "camel_modifier", from = "src"}]
+repository = "https://github.com/CSWellesSun/CAMEL"
+license = "Apache-2.0" 
 
 [tool.poetry.dependencies]
 python = "^3.9"
