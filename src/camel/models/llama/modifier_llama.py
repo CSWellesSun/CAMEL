@@ -28,8 +28,8 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 
-from camel_modifier.utils.choices import mc_sim_7b_63
-from camel_modifier.utils.tree import generate_tree_buffers_camel
+from camel.utils.choices import mc_sim_7b_63
+from camel.utils.tree import generate_tree_buffers_camel
 
 top_k = 10
 

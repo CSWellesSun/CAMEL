@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from safetensors import safe_open
 from accelerate import Accelerator
 from accelerate.utils import set_seed
-from camel_modifier import CamelModifier
+from camel import CamelModifier
 from typing import Any, Dict, List
 from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader

@@ -11,11 +11,11 @@ import shortuuid
 from tqdm import tqdm
 
 from fastchat.model import get_conversation_template
-from camel_modifier.camel_model import CamelModel
-from camel_modifier.utils.cache import initialize_past_key_values
-from camel_modifier.utils.tree import *
-from camel_modifier.utils.choices import *
-from camel_modifier.utils.logits_precessor import prepare_logits_processor
+from camel.camel_model import CamelModel
+from camel.utils.cache import initialize_past_key_values
+from camel.utils.tree import *
+from camel.utils.choices import *
+from camel.utils.logits_precessor import prepare_logits_processor
 from accelerate.utils import set_seed
 
 set_seed(0)
