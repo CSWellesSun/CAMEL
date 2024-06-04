@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "modifier"
-version = "0.0.1"
+version = "0.0.2"
 description = "CAMEL: Context-Aware Modifier for Efficient Language model"
 authors = ["Welles Sun <welles.sun@zju.edu.cn>"]
 readme = "README.md"
