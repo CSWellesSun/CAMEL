@@ -49,6 +49,8 @@ CAMEL has the following modifier based on Llama2 (`h` stands for hidden size, `w
 
 ## Performance
 
+We test modifier `0xWe11es/camel-llama2-h1024-w4` on several datasets, and get the following results compared to vanilla model (hf version).
+
 | Dataset  | Model       | Temperature | Speed(Token/s) | Speedup |
 |----------|-------------|-------------|----------------|---------|
 | MT-Bench | LlaMa2 7B   | 0.0         | 71.85          | 1.92x   |
